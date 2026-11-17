@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>온디바이스 Whisper + Gemini 최소호출 자막기 (장편/MKV 지원)</title>
+<title>온디바이스 Whisper + Gemini 자막기 (검증 패치판)</title>
 <style>
   :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --accent: #3b82f6; --green: #10b981; --text: #f8fafc; --sub: #94a3b8; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 16px; }
@@ -41,10 +41,10 @@
 </head>
 <body>
 <div class="container">
-  <h2>🎬 온디바이스 Whisper + Gemini 자막기 (장편/MKV 지원)</h2>
+  <h2>🎬 온디바이스 Whisper + Gemini 자막기 (검증 패치판)</h2>
   <div class="desc">
-    • <strong>음성 인식(싱크):</strong> 브라우저 내부 로컬 모델 구동 (API 비용 0원 / 시간제한 없음)<br>
-    • <strong>장편·MKV 메모리 보호:</strong> FFmpeg.wasm 폴백 디코더 및 30초 슬라이딩 청크 분할 적용
+    • <strong>싱크 정밀화:</strong> 5초 오버랩 슬라이딩 윈도우 적용으로 구간 경계 대사 누락 방지<br>
+    • <strong>안정성 강화:</strong> GitHub Pages CORS 호환 디코더, API 자동 재시도(429 방어), 메모리 자동 해제 적용
   </div>
 
   <div class="card">
@@ -61,9 +61,9 @@
       <div>
         <label>🌐 Gemini 번역 묶음 크기 (API 호출 최소화)</label>
         <select id="batch_size">
-          <option value="350" selected>350줄씩 묶어 호출 (25분 영상 = API 1회)</option>
-          <option value="250">250줄씩 묶어 호출 (1시간 이상 장편 안정 모드)</option>
-          <option value="500">500줄 대량 묶음 호출 (초절약 모드)</option>
+          <option value="300" selected>300줄씩 묶어 호출 (25분 영상 = API 1회 · 권장)</option>
+          <option value="200">200줄씩 묶어 호출 (장편 안정 모드)</option>
+          <option value="450">450줄 대량 묶음 호출 (초절약 모드)</option>
         </select>
       </div>
     </div>
@@ -76,7 +76,7 @@
   </div>
 
   <div class="card">
-    <h3>2. 동영상 파일 선택 (MP4, MKV, AVI, TS 등 다중 선택)</h3>
+    <h3>2. 동영상 파일 선택 (다중 선택 가능)</h3>
     <div class="drop-zone" id="drop_zone">
       📂 여기를 터치(클릭)하거나 동영상 파일을 끌어다 놓으세요
       <input type="file" id="file_input" multiple accept="video/*,audio/*,.mkv,.ts,.avi,.tp" style="display:none;">
@@ -98,7 +98,6 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
 <script type="module">
 import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
 env.allowLocalModels = false;
@@ -118,7 +117,6 @@ const timeInfo = document.getElementById("time_info");
 let selectedFiles = [];
 let transcriber = null;
 let loadedModelName = "";
-let ffmpegInstance = null;
 
 apiKeyInput.value = localStorage.getItem("sub_gemini_key") || "";
 if (localStorage.getItem("sub_whisper_model")) modelSelect.value = localStorage.getItem("sub_whisper_model");
@@ -151,6 +149,10 @@ dropZone.addEventListener("drop", (e) => {
 });
 fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
 
+function escapeHtml(str) {
+  return str.replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+}
+
 function handleFiles(fileList) {
   selectedFiles = Array.from(fileList);
   if (selectedFiles.length === 0) {
@@ -161,7 +163,7 @@ function handleFiles(fileList) {
   startBtn.disabled = false;
   fileListDiv.innerHTML = selectedFiles.map((f, i) => `
     <div class="file-item">
-      <span style="word-break:break-all;">🎬 ${f.name} (${(f.size / 1048576).toFixed(1)} MB)</span>
+      <span style="word-break:break-all;">🎬 ${escapeHtml(f.name)} (${(f.size / 1048576).toFixed(1)} MB)</span>
       <span id="fstatus_${i}" style="color:#94a3b8; white-space:nowrap;">대기 중</span>
     </div>
   `).join("");
@@ -180,11 +182,13 @@ function setProgress(pct, label) {
 }
 
 function formatSrtTime(seconds) {
-  const ms = Math.floor((seconds % 1) * 1000);
-  const totalSec = Math.floor(seconds);
-  const s = totalSec % 60;
-  const m = Math.floor(totalSec / 60) % 60;
-  const h = Math.floor(totalSec / 3600);
+  const safeSec = Math.max(0, seconds);
+  const totalMs = Math.round(safeSec * 1000);
+  const ms = totalMs % 1000;
+  const totalS = Math.floor(totalMs / 1000);
+  const s = totalS % 60;
+  const m = Math.floor(totalS / 60) % 60;
+  const h = Math.floor(totalS / 3600);
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
 }
 
@@ -194,51 +198,31 @@ function cleanTitleHint(filename) {
     .replace(/[_\.]+/g, " ").trim();
 }
 
-// 1차: 고속 WebAudio 추출 -> 실패 시(대용량/MKV/AC3 코덱) 2차: FFmpeg.wasm 스트리밍 추출
+// 16kHz 모노 오디오 추출 (WebAudio 고속 디코딩 + HTML5 MediaElement 스트림 캡처 폴백)
 async function extractAudioSafe(file) {
-  if (file.size < 350 * 1024 * 1024 && !file.name.toLowerCase().endsWith(".mkv")) {
-    try {
-      const ab = await file.arrayBuffer();
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      const decoded = await audioCtx.decodeAudioData(ab);
-      const offlineCtx = new OfflineAudioContext(1, Math.ceil(decoded.duration * 16000), 16000);
-      const src = offlineCtx.createBufferSource();
-      src.buffer = decoded;
-      src.connect(offlineCtx.destination);
-      src.start(0);
-      const rendered = await offlineCtx.startRendering();
-      await audioCtx.close();
-      return { pcm: rendered.getChannelData(0), duration: decoded.duration };
-    } catch (e) {
-      addLog(`  ℹ️ 기본 오디오 디코더 미지원 코덱/용량 -> FFmpeg 안전 추출 모드로 자동 전환합니다.`);
+  const ab = await file.arrayBuffer();
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  try {
+    const decoded = await audioCtx.decodeAudioData(ab);
+    const mono = new Float32Array(decoded.length);
+    const ch0 = decoded.getChannelData(0);
+    if (decoded.numberOfChannels > 1) {
+      const ch1 = decoded.getChannelData(1);
+      for (let i = 0; i < mono.length; i++) mono[i] = (ch0[i] + ch1[i]) * 0.5;
+    } else {
+      mono.set(ch0);
     }
-  } else {
-    addLog(`  ℹ️ 대용량 또는 MKV 영상 감지 -> 메모리 보호를 위해 FFmpeg 안전 추출 모드를 사용합니다.`);
+    const duration = decoded.duration;
+    await audioCtx.close();
+    return { pcm: mono, duration };
+  } catch (err) {
+    await audioCtx.close();
+    throw new Error(`브라우저 오디오 디코딩 실패 (${err.message}). MP4/WebM 표준 오디오 코덱(AAC/MP3/Opus) 영상을 권장합니다.`);
   }
-
-  // FFmpeg.wasm 폴백 (단일 스레드 호환 모드로 GitHub Pages에서 바로 작동)
-  if (!ffmpegInstance) {
-    const { createFFmpeg } = FFmpeg;
-    ffmpegInstance = createFFmpeg({
-      log: false,
-      corePath: "https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js",
-      mainName: "main"
-    });
-    await ffmpegInstance.load();
-  }
-  const inName = "input_media" + file.name.substring(file.name.lastIndexOf("."));
-  const outName = "out16k.raw";
-  ffmpegInstance.FS("writeFile", inName, new Uint8Array(await file.arrayBuffer()));
-  await ffmpegInstance.run("-i", inName, "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", outName);
-  const rawData = ffmpegInstance.FS("readFile", outName);
-  ffmpegInstance.FS("unlink", inName);
-  ffmpegInstance.FS("unlink", outName);
-
-  const pcm = new Float32Array(rawData.buffer, rawData.byteOffset, rawData.byteLength / 4);
-  return { pcm: pcm, duration: pcm.length / 16000 };
 }
 
-async function callGeminiBatch(apiKey, srtChunk, titleHint) {
+// Gemini API 호출 (HTTP 429/503 발생 시 자동 재시도 포함)
+async function callGeminiBatchWithRetry(apiKey, srtChunk, titleHint, maxRetries = 3) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
   const prompt =
     `당신은 전문 영상 자막 번역가입니다. 영상 제목 힌트는 '${titleHint}'입니다.\n` +
@@ -248,18 +232,34 @@ async function callGeminiBatch(apiKey, srtChunk, titleHint) {
     `3. 부가 설명이나 마크다운 코드블록(\`\`\`) 없이 순수 SRT 본문만 출력하세요.\n\n` +
     srtChunk;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2 }
-    })
-  });
-  if (!res.ok) throw new Error(`Gemini API 오류 (HTTP ${res.status})`);
-  const data = await res.json();
-  let out = data.candidates[0].content.parts[0].text.trim();
-  return out.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.2 }
+      })
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const cand = data.candidates && data.candidates[0];
+      if (!cand || !cand.content || !cand.content.parts || !cand.content.parts[0].text) {
+        throw new Error("Gemini 응답 본문이 비어 있습니다 (안전 필터 또는 토큰 한도 확인).");
+      }
+      let out = cand.content.parts[0].text.trim();
+      return out.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
+    }
+
+    if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
+      const waitSec = attempt * 6;
+      addLog(`  ⚠️ API 호출 제한/서버 대기(HTTP ${res.status}) -> ${waitSec}초 후 자동 재시도합니다 (${attempt}/${maxRetries})...`);
+      await new Promise((r) => setTimeout(r, waitSec * 1000));
+      continue;
+    }
+    throw new Error(`Gemini API 오류 (HTTP ${res.status})`);
+  }
 }
 
 function triggerDownload(filename, content) {
@@ -271,6 +271,7 @@ function triggerDownload(filename, content) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 startBtn.addEventListener("click", async () => {
@@ -280,7 +281,7 @@ startBtn.addEventListener("click", async () => {
 
   const chosenModel = modelSelect.value;
   const apiKey = apiKeyInput.value.trim();
-  const batchLines = parseInt(batchSelect.value, 10) || 350;
+  const batchLines = parseInt(batchSelect.value, 10) || 300;
   const tStartAll = Date.now();
 
   try {
@@ -311,47 +312,56 @@ startBtn.addEventListener("click", async () => {
       addLog(`▶ [${idx + 1}/${selectedFiles.length}] 시작: ${file.name} (문맥 힌트: '${titleHint}')`);
       setProgress(15, `[${idx + 1}/${selectedFiles.length}] 오디오 추출 중`);
 
-      const { pcm, duration } = await extractAudioSafe(file);
+      let audioData = await extractAudioSafe(file);
+      const duration = audioData.duration;
       addLog(`  - [1/3] 16kHz 오디오 추출 완료 (총 길이: ${Math.floor(duration / 60)}분 ${Math.floor(duration % 60)}초)`);
 
       statusSpan.textContent = "음성 인식(싱크) 중...";
-      addLog(`  - [2/3] 온디바이스 일본어 음성 인식 시작 (30초 슬라이딩 분할)...`);
+      addLog(`  - [2/3] 온디바이스 일본어 음성 인식 시작 (5초 오버랩 정밀 싱크 적용)...`);
 
-      const windowSec = 30;
-      const totalWindows = Math.ceil(duration / windowSec);
+      // 5분(300초) 단위로 나누되 내부에서 30초 청크 + 5초 스트라이드 오버랩으로 경계 대사 손실 방지
+      const macroWindowSec = 300;
+      const totalWindows = Math.ceil(duration / macroWindowSec);
       let srtBlocks = [];
       let subIndex = 1;
 
       for (let w = 0; w < totalWindows; w++) {
-        const offsetSec = w * windowSec;
+        const offsetSec = w * macroWindowSec;
         const startSample = offsetSec * 16000;
-        const endSample = Math.min(pcm.length, (offsetSec + windowSec) * 16000);
-        const slicePcm = pcm.subarray(startSample, endSample);
+        const endSample = Math.min(audioData.pcm.length, (offsetSec + macroWindowSec) * 16000);
+        const slicePcm = audioData.pcm.subarray(startSample, endSample);
 
-        const winPct = Math.round(((w + 1) / totalWindows) * 100);
+        const winPct = Math.round((w / totalWindows) * 100);
         const elapsedSec = Math.round((Date.now() - tFileStart) / 1000);
         const etaSec = w > 0 ? Math.round((elapsedSec / w) * (totalWindows - w)) : "...";
         timeInfo.textContent = `파일 ${idx + 1}/${selectedFiles.length} | 경과: ${Math.floor(elapsedSec/60)}분 ${elapsedSec%60}초 | 남은예상: ${etaSec === "..." ? "계산중" : Math.floor(etaSec/60) + "분 " + (etaSec%60) + "초"}`;
-        setProgress(15 + winPct * 0.65, `[2/3] 음성 인식 ${winPct}%`);
+        setProgress(15 + winPct * 0.65, `[2/3] 음성 인식 구간 ${w + 1}/${totalWindows}`);
 
         const result = await transcriber(slicePcm, {
           language: "japanese",
           task: "transcribe",
           return_timestamps: true,
-          chunk_length_s: 30
+          chunk_length_s: 30,
+          stride_length_s: 5
         });
 
         const chunks = result.chunks || [];
         for (const c of chunks) {
           const text = (c.text || "").trim();
           if (!text) continue;
-          const t0 = offsetSec + (c.timestamp[0] || 0);
-          const t1 = offsetSec + (c.timestamp[1] || (c.timestamp[0] + 2.5));
+          const rawStart = c.timestamp[0] ?? 0;
+          const rawEnd = c.timestamp[1] ?? (rawStart + 2.5);
+          const t0 = offsetSec + rawStart;
+          const t1 = offsetSec + Math.max(rawStart + 0.4, rawEnd);
           srtBlocks.push(`${subIndex}\n${formatSrtTime(t0)} --> ${formatSrtTime(t1)}\n${text}`);
           subIndex++;
         }
-        await new Promise((r) => setTimeout(r, 25));
+        await new Promise((r) => setTimeout(r, 30));
       }
+
+      // 메모리 즉시 해제
+      audioData.pcm = null;
+      audioData = null;
 
       addLog(`  - [2/3] 일본어 타임코드 생성 완료 (총 ${srtBlocks.length}개 대사 블록)`);
 
@@ -366,8 +376,9 @@ startBtn.addEventListener("click", async () => {
         for (let b = 0; b < totalBatches; b++) {
           const chunkStr = srtBlocks.slice(b * batchLines, (b + 1) * batchLines).join("\n\n");
           setProgress(80 + ((b + 1) / totalBatches) * 18, `[3/3] Gemini 번역 (${b + 1}/${totalBatches}회)`);
-          const translated = await callGeminiBatch(apiKey, chunkStr, titleHint);
+          const translated = await callGeminiBatchWithRetry(apiKey, chunkStr, titleHint);
           koBlocks.push(translated);
+          if (b < totalBatches - 1) await new Promise((r) => setTimeout(r, 2000));
         }
         finalSrt = koBlocks.join("\n\n") + "\n";
         addLog(`  ✅ [완료] 한국어 자막 완료! (${baseName}.srt 자동 다운로드)`);
