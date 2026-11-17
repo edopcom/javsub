@@ -69,14 +69,26 @@
 <div class="container">
   <h2>🎬 온디바이스 Whisper + Gemini 자막기</h2>
   <div class="desc">
-    • <strong>음성 인식은 100% 브라우저 내부</strong> (WebGPU 가속, 미지원 시 WASM) · Web Worker에서 실행되어 화면이 멈추지 않음<br>
+    • <strong>음성 인식은 100% 브라우저 내부</strong> · 고속 모드(Moonshine-ja + 대사 구간 감지) 또는 정밀 모드(Whisper, WebGPU/WASM) · Web Worker에서 실행되어 화면이 멈추지 않음<br>
     • <strong>대용량·MKV 대응:</strong> FFmpeg.wasm이 파일을 통째로 읽지 않고 5분 구간씩만 16kHz로 추출 (AC3/DTS/5.1ch 포함)<br>
     • <strong>싱크 보존:</strong> 구간 경계를 대사 사이 쉼에 맞춤 · 번역은 줄 ID로만 매칭하고 타임코드는 로컬 원본 유지
   </div>
 
   <div class="card">
     <h3>1. 모델 및 API 설정 (이 브라우저에 저장됨)</h3>
-    <div class="row">
+    <label>🚀 음성 인식 엔진</label>
+    <select id="asr_engine">
+      <option value="fast" selected>고속: Moonshine-ja + 대사 구간 감지(VAD) · 일본어 전용 · 태블릿 권장 (약 3~5배 빠름)</option>
+      <option value="whisper">정밀: Whisper (아래 모델·장치 설정 사용 · 노트북 WebGPU에 적합)</option>
+    </select>
+    <div id="fast_opts">
+      <label>👂 대사 감지 감도 (고속 모드)</label>
+      <select id="vad_sens">
+        <option value="normal" selected>보통 (일반 대화·드라마 · 배경음 오인식 적음)</option>
+        <option value="high">높음 (속삭임·작은 목소리가 많은 영상 · 배경음까지 잡을 수 있음)</option>
+      </select>
+    </div>
+    <div class="row" id="whisper_opts">
       <div>
         <label>🎙️ Whisper 모델 (최초 1회 다운로드 후 캐시)</label>
         <select id="whisper_model">
@@ -147,7 +159,8 @@
 
 <!-- ───────── 음성 인식 Worker (module) : 메인 스레드를 막지 않도록 분리 ───────── -->
 <script type="text/plain" id="asr_worker_src">
-import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
+import * as T from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
+const { pipeline, env } = T;
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 // sw.js가 COOP/COEP 헤더를 넣어 crossOriginIsolated가 되면 SharedArrayBuffer로 WASM 멀티스레드 사용 가능.
@@ -181,6 +194,7 @@ async function load(model, device) {
   if (asr && loadedKey === key) return { device: asr.__device, dtype: asr.__dtype, cached: true, threads: asr.__device === "wasm" ? THREADS : 0 };
   if (asr) { try { await asr.dispose(); } catch (e) {} asr = null; loadedKey = ""; }
   const phase = (text) => self.postMessage({ type: "phase", device, text });
+  if (model.startsWith("fast:")) return loadFast(model.slice(5), key, phase);
 
   let gpu = null;
   if (device === "webgpu") {
@@ -215,12 +229,180 @@ async function load(model, device) {
   return { device, dtype: p.__dtype, cached: false, threads: device === "wasm" ? THREADS : 0 };
 }
 
+// ───── 고속 모드: Silero VAD로 대사 구간만 잘라 Moonshine-ja로 인식 ─────
+// Whisper는 짧은 대사도 30초로 채워 계산하지만 Moonshine은 실제 길이만큼만 계산 → 무음 스킵 + 대사당 연산 감소.
+// 타임코드는 VAD가 자른 대사 경계(32ms 해상도)를 그대로 사용.
+let vadModel = null;
+const VAD_FRAME = 512, VAD_CTX = 64, FRAME_SEC = VAD_FRAME / 16000;
+const LOWMEM = { enableCpuMemArena: false, enableMemPattern: false };
+
+function makeProgress(phase) {
+  const files = {};
+  return (x) => {
+    if (x.status === "progress" && x.file && x.total) {
+      files[x.file] = { loaded: x.loaded || 0, total: x.total };
+      let l = 0, t = 0;
+      for (const k in files) { l += files[k].loaded; t += files[k].total; }
+      self.postMessage({ type: "load_progress", frac: t ? l / t : 0, mb: Math.round(t / 1048576) });
+    } else if (x.status === "done" && x.file) phase("파일 준비 완료: " + x.file.split("/").pop());
+  };
+}
+
+// VAD는 별도 Worker(단일 스레드)에서 실행 → 인식 Worker가 현재 구간을 처리하는 동안 다음 구간의 대사 감지를 동시에 진행
+async function loadVad() {
+  if (vadModel) return;
+  env.backends.onnx.wasm.numThreads = 1; // 이 Worker는 VAD 전용: 인식용 코어를 빼앗지 않도록 1스레드
+  vadModel = await T.AutoModel.from_pretrained("onnx-community/silero-vad", { config: { model_type: "custom" }, dtype: "fp32", device: "wasm" });
+  await vadProbs(new Float32Array(16000));
+}
+
+async function loadFast(repo, key, phase) {
+  const prog = makeProgress(phase);
+  phase("Moonshine-ja 모델 확인/다운로드");
+  // 이 저장소의 tokenizer_config가 'PreTrainedTokenizer'로 되어 있어 AutoTokenizer가 인식하지 못함 → 직접 생성해 주입
+  const base = "https://huggingface.co/" + repo + "/resolve/main/";
+  const [tj, tc] = await Promise.all([fetch(base + "tokenizer.json").then((r) => r.json()), fetch(base + "tokenizer_config.json").then((r) => r.json())]);
+  const tokenizer = new T.PreTrainedTokenizer(tj, tc);
+  const processor = await T.AutoProcessor.from_pretrained(repo, { progress_callback: prog });
+  processor.components = { ...(processor.components || {}), tokenizer };
+  const model = await T.AutoModelForSpeechSeq2Seq.from_pretrained(repo, { device: "wasm", dtype: "q8", session_options: LOWMEM, progress_callback: prog });
+  const p = new T.AutomaticSpeechRecognitionPipeline({ task: "automatic-speech-recognition", model, tokenizer, processor });
+  phase("추론 세션 생성 완료 → 워밍업 실행");
+  await p(new Float32Array(16000), { max_new_tokens: 4 });
+  p.__device = "wasm"; p.__dtype = "q8"; p.__fast = true;
+  asr = p; loadedKey = key;
+  return { device: "wasm", dtype: "q8", cached: false, threads: THREADS, fast: true };
+}
+
+async function vadProbs(pcm, onTick) {
+  const n = Math.floor(pcm.length / VAD_FRAME);
+  const probs = new Float32Array(n);
+  const sr = new T.Tensor("int64", BigInt64Array.from([16000n]), []);
+  let state = new T.Tensor("float32", new Float32Array(2 * 128), [2, 1, 128]);
+  const buf = new Float32Array(VAD_CTX + VAD_FRAME); // [직전 프레임 끝 64샘플 | 현재 512샘플] (Silero v5 공식 방식)
+  for (let i = 0; i < n; i++) {
+    buf.copyWithin(0, VAD_FRAME, VAD_FRAME + VAD_CTX);
+    const frame = pcm.subarray(i * VAD_FRAME, (i + 1) * VAD_FRAME);
+    buf.set(frame, VAD_CTX);
+    // 사실상 무음(약 -60dBFS 미만) 프레임은 모델 호출 생략 → 무음이 긴 영상에서 VAD 시간 절약
+    let e = 0;
+    for (let j = 0; j < frame.length; j++) e += frame[j] * frame[j];
+    if (e / frame.length < 1e-6) { probs[i] = 0; continue; }
+    const out = await vadModel({ input: new T.Tensor("float32", buf.slice(), [1, buf.length]), sr, state });
+    probs[i] = out.output.data[0];
+    state = out.stateN;
+    if (onTick && i % 1000 === 0) onTick(i / n);
+  }
+  return probs;
+}
+
+// Silero get_speech_timestamps 방식 + 자막용 조정
+// - ONNX moonshine은 약 9~10초 넘는 입력에서 브로드캐스트 오류/문장 잘림 보고 → 발화를 최대 8초로 분할(패딩 포함 8.5초 이내),
+//   분할 지점은 확률이 가장 낮은(숨 쉬는) 순간
+// - 1초 미만 클립은 인식률이 급락 → 가까운 짧은 대사끼리 병합하고, 남은 짧은 클립은 주변 무음으로 1초까지 늘림
+// - 감도(sens): 'high'는 속삭임이 많은 영상용(임계값을 낮춤, 대신 배경음을 대사로 착각할 가능성 증가)
+const VAD_PRESETS = { normal: { TH: 0.5, NEG: 0.35 }, high: { TH: 0.35, NEG: 0.2 } };
+function speechSegments(probs, totalSec, sens) {
+  const { TH, NEG } = VAD_PRESETS[sens] || VAD_PRESETS.normal;
+  const MIN_SIL = 0.3, MIN_SPEECH = 0.2, PAD = 0.25, MAX_SPEECH = 8, MIN_CLIP = 1.0, MERGE_GAP = 0.6;
+  const raw = [];
+  let inSp = false, start = 0, silStart = null, minP = 1, minT = null;
+  for (let i = 0; i < probs.length; i++) {
+    const t = i * FRAME_SEC, p = probs[i];
+    if (!inSp) {
+      if (p >= TH) { inSp = true; start = t; silStart = null; minP = 1; minT = null; }
+      continue;
+    }
+    // 분할 후보: 발화 4초 이후 중 확률이 가장 낮은 지점(동률이면 뒤쪽 → 너무 짧은 조각 방지)
+    if (t - start > 4 && p <= minP) { minP = p; minT = t; }
+    if (p < NEG) {
+      if (silStart === null) silStart = t;
+      if (t - silStart >= MIN_SIL) { raw.push([start, silStart]); inSp = false; continue; }
+    } else silStart = null;
+    if (t - start >= MAX_SPEECH) {
+      const cut = minT !== null && minT - start > 4 ? minT : t;
+      raw.push([start, cut]);
+      start = cut; minP = 1; minT = null; silStart = null;
+    }
+  }
+  const open = inSp;
+  if (inSp) raw.push([start, totalSec]);
+  let segs = raw.filter(([a, b]) => b - a >= MIN_SPEECH).map(([a, b]) => ({ a, b }));
+  // 짧은 대사(1초 미만)는 바로 옆 대사와 간격이 짧고 합쳐도 8초 이내면 병합
+  const merged = [];
+  for (const s of segs) {
+    const p = merged[merged.length - 1];
+    const short = (s.b - s.a < MIN_CLIP) || (p && p.b - p.a < MIN_CLIP);
+    if (p && short && s.a - p.b <= MERGE_GAP && s.b - p.a <= MAX_SPEECH) p.b = s.b;
+    else merged.push({ ...s });
+  }
+  segs = merged;
+  for (let i = 0; i < segs.length; i++) {
+    const prevEnd = i ? segs[i - 1].b : 0, nextStart = i < segs.length - 1 ? segs[i + 1].a : totalSec;
+    let st = Math.max(prevEnd, segs[i].a - PAD, 0);
+    let en = Math.min(nextStart, segs[i].b + PAD, totalSec);
+    // 그래도 1초 미만이면 주변 무음 쪽으로 대칭 확장 (이웃 대사 침범 금지)
+    const lack = MIN_CLIP - (en - st);
+    if (lack > 0) {
+      st = Math.max(prevEnd, 0, st - lack / 2);
+      en = Math.min(nextStart, totalSec, st + MIN_CLIP);
+    }
+    segs[i].start = st;
+    segs[i].end = en;
+  }
+  return { segs, open: open && segs.length > 0 };
+}
+
+// Moonshine-ja 출력에 끼는 일본어 글자 사이 공백 제거 (영문·숫자 사이 공백은 유지)
+const JA = "\\u3000-\\u303f\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uff00-\\uffef";
+const JA_SPACE_RE = new RegExp("([" + JA + "])\\s+(?=[" + JA + "])", "g");
+const tidyJa = (t) => t.replace(JA_SPACE_RE, "$1").replace(/\s{2,}/g, " ").trim();
+
+// VAD Worker: 구간 PCM → 대사 구간 목록. 구간 끝까지 이어지는 대사는 잘렸을 수 있으므로
+// 인식 대상에서 빼고 시작 위치(tailStart)를 돌려줌 → 다음 구간을 그 대사 시작점부터 다시 읽음
+async function detectSpeech(m) {
+  const total = m.pcm.length / 16000;
+  const probs = await vadProbs(m.pcm);
+  const { segs, open } = speechSegments(probs, total, m.sens);
+  let tailStart = null;
+  if (!m.isLast && open) tailStart = segs.pop().a;
+  return { segs: segs.map((s) => ({ start: s.start, end: s.end })), tailStart };
+}
+
+// 인식 Worker: 대사 구간별 Moonshine 인식
+async function recognizeSegments(m) {
+  const pcm = m.pcm, segs = m.segs;
+  const cues = [];
+  let speechSec = 0;
+  for (let k = 0; k < segs.length; k++) {
+    const s = segs[k];
+    const a = Math.floor(s.start * 16000), b = Math.min(pcm.length, Math.ceil(s.end * 16000));
+    const dur = (b - a) / 16000;
+    speechSec += dur;
+    // Moonshine 기본 출력 한도는 영어 기준이라 일본어에선 문장 끝이 잘림 → 길이에 비례해 넉넉히
+    const out = await asr(pcm.subarray(a, b), { max_new_tokens: Math.ceil(dur * 12) + 8 });
+    const text = tidyJa(out && out.text ? out.text : "");
+    if (text) cues.push({ start: s.start, end: s.end, text });
+    self.postMessage({ type: "fast_progress", stage: "asr", done: k + 1, total: segs.length });
+  }
+  return { cues, speechSec };
+}
+
 self.onmessage = async (ev) => {
   const m = ev.data;
   try {
     if (m.type === "load") {
       const r = await load(m.model, m.device);
       self.postMessage({ type: "loaded", id: m.id, ...r });
+    } else if (m.type === "load_vad") {
+      await loadVad();
+      self.postMessage({ type: "ok", id: m.id });
+    } else if (m.type === "vad") {
+      const r = await detectSpeech(m);
+      self.postMessage({ type: "vad_result", id: m.id, ...r });
+    } else if (m.type === "asr_segments") {
+      const r = await recognizeSegments(m);
+      self.postMessage({ type: "asr_result", id: m.id, ...r });
     } else if (m.type === "transcribe") {
       const out = await asr(m.pcm, {
         language: "japanese", task: "transcribe",
@@ -345,6 +527,7 @@ const LOG_MAX_LINES = 500;
 const $ = (id) => document.getElementById(id);
 const apiKeyInput = $("api_key"), geminiModelInput = $("gemini_model"), modelSelect = $("whisper_model");
 const deviceSelect = $("asr_device"), batchSelect = $("batch_size"), fileInput = $("file_input");
+const engineSelect = $("asr_engine"), whisperOpts = $("whisper_opts"), fastOpts = $("fast_opts"), vadSensSelect = $("vad_sens");
 const dropZone = $("drop_zone"), fileListDiv = $("file_list"), startBtn = $("btn_start"), logBox = $("log_box");
 
 let selectedFiles = [];
@@ -364,6 +547,17 @@ apiKeyInput.value = store.get("sub_gemini_key") || "";
 geminiModelInput.value = store.get("sub_gemini_model") || DEFAULT_GEMINI_MODEL;
 restoreSelect(modelSelect, "sub_whisper_model");
 restoreSelect(deviceSelect, "sub_asr_device");
+restoreSelect(engineSelect, "sub_asr_engine");
+restoreSelect(vadSensSelect, "sub_vad_sens");
+// 선택한 엔진에서 쓰이지 않는 설정은 흐리게 표시
+function syncEngineUi() {
+  const fast = engineSelect.value === "fast";
+  whisperOpts.style.opacity = fast ? "0.45" : "1";
+  fastOpts.style.opacity = fast ? "1" : "0.45";
+}
+syncEngineUi();
+engineSelect.addEventListener("change", syncEngineUi);
+vadSensSelect.addEventListener("change", () => store.set("sub_vad_sens", vadSensSelect.value));
 restoreSelect(batchSelect, "sub_batch_size");
 
 // 태블릿/폰은 첫 사용 시 메모리 여유가 큰 Base를 기본값으로
@@ -409,6 +603,7 @@ function saveSettings() {
     store.set("sub_gemini_model", geminiModelInput.value.trim() || DEFAULT_GEMINI_MODEL),
     store.set("sub_whisper_model", modelSelect.value),
     store.set("sub_asr_device", deviceSelect.value),
+    store.set("sub_asr_engine", engineSelect.value),
     store.set("sub_batch_size", batchSelect.value)
   ].every(Boolean);
 }
@@ -420,7 +615,7 @@ $("btn_toggle_key").addEventListener("click", function () {
 $("btn_save_cfg").addEventListener("click", () => {
   addLog(saveSettings() ? "✅ 설정이 이 브라우저에 저장되었습니다." : "⚠️ 이 브라우저(사생활 보호 모드 등)에서는 설정을 저장할 수 없습니다.");
 });
-[modelSelect, deviceSelect, batchSelect].forEach((s) => s.addEventListener("change", saveSettings));
+[modelSelect, deviceSelect, batchSelect, engineSelect].forEach((s) => s.addEventListener("change", saveSettings));
 
 dropZone.addEventListener("click", () => { if (!isProcessing) fileInput.click(); });
 dropZone.addEventListener("dragover", (e) => { e.preventDefault(); if (!isProcessing) dropZone.style.borderColor = "#10b981"; });
@@ -494,7 +689,7 @@ function setBusy(busy) {
   isProcessing = busy;
   window.__busy = busy;
   startBtn.disabled = busy || selectedFiles.length === 0;
-  modelSelect.disabled = busy; deviceSelect.disabled = busy;
+  modelSelect.disabled = busy; deviceSelect.disabled = busy; engineSelect.disabled = busy;
   dropZone.classList.toggle("busy", busy);
   if (busy) { acquireWakeLock(); ui.start(); } else { releaseWakeLock(); ui.stop(); }
 }
@@ -607,8 +802,13 @@ function asrEvent(m) {
   } else if (m.type === "load_progress") {
     ui.label(`모델 다운로드 ${Math.round(m.frac * 100)}% (총 ${m.mb}MB, 다음부터 캐시)`);
     ui.frac(m.frac);
+  } else if (m.type === "fast_progress") {
+    Object.assign(fastProg, m);
   }
 }
+// 고속 모드 구간 내부 진행 상황 (VAD 0~10%, 대사 인식 10~100%)
+const fastProg = { stage: "vad", frac: 0, done: 0, total: 0 };
+const FAST_MODEL = "fast:onnx-community/moonshine-base-ja-ONNX";
 
 function killAsrWorker() {
   if (asrWorker) asrWorker.terminate();
@@ -638,8 +838,10 @@ async function ensureAsr(model, device) {
   const key = model + "|" + device;
   if (asrCall && asrLoadedKey === key) return asrInfo;
   const big = /large/.test(model);
+  const fast = model.startsWith("fast:");
   let order;
-  if (device === "wasm") order = ["wasm"];
+  if (fast) order = ["wasm"]; // Moonshine은 대사 길이만큼만 계산해서 CPU(WASM 멀티스레드)로 충분히 빠름
+  else if (device === "wasm") order = ["wasm"];
   else if (device === "webgpu") order = ["webgpu"];
   else if (!navigator.gpu) order = ["wasm"];
   // 모바일 GPU(Mali 등)는 WebGPU 세션 생성에서 멈추는 사례가 많아 자동 모드에선 WASM 우선. 이전에 실패한 기기도 WASM.
@@ -648,14 +850,19 @@ async function ensureAsr(model, device) {
   if (big) order = order.filter((d) => d === "webgpu");
   if (!order.length) throw new Error("Large 모델은 WebGPU가 필요합니다 (WASM에서는 메모리 부족)");
 
-  addLog(`⏳ Whisper 모델 준비: ${model.split("/").pop()} (요청: ${device}, 시도 순서: ${order.join(" → ").toUpperCase()}${IS_MOBILE ? ", 모바일 기기" : ""})`);
-  ui.stageSet("load", "Whisper 모델 준비 중", 0);
+  addLog(fast
+    ? `⏳ 고속 모드 준비: Moonshine-base-ja + Silero VAD (WASM)`
+    : `⏳ Whisper 모델 준비: ${model.split("/").pop()} (요청: ${device}, 시도 순서: ${order.join(" → ").toUpperCase()}${IS_MOBILE ? ", 모바일 기기" : ""})`);
+  ui.stageSet("load", fast ? "고속 모드 모델 준비 중" : "Whisper 모델 준비 중", 0);
   let r = null, lastErr = null;
   for (const d of order) {
     try {
       // 탭이 강제 종료되면 JS가 아무것도 남길 수 없으므로, 시작 전에 표시를 남기고 성공하면 지움 → 다음 접속 때 감지
       store.set(CRASH_KEY, JSON.stringify({ phase: "load", model, device: d, t: Date.now() }));
+      const vadP = fast ? ensureVad() : null; // VAD 모델은 별도 Worker에서 동시에 준비
+      if (vadP) vadP.catch(() => {});
       r = await loadAsrOnce(model, d);
+      if (vadP) await vadP;
       clearCrashMark();
       if (d === "webgpu") try { localStorage.removeItem(gpuBadKey(model)); } catch {}
       break;
@@ -670,7 +877,9 @@ async function ensureAsr(model, device) {
   if (!r) throw new Error(`모델 로드 실패 (${errMsg(lastErr)}). 연산 장치를 'WASM 강제'로, 모델을 Base로 바꿔 다시 시도해 보세요.`);
   asrLoadedKey = key;
   asrInfo = r;
-  ui.S.model = `${model.split("/").pop().replace("whisper-", "")} · ${r.device.toUpperCase()} (${r.dtype.replace(/[{}"]/g, "").replace(/_model(_merged)?/g, "")})`;
+  ui.S.model = fast
+    ? `Moonshine-base-ja + VAD · WASM (q8)`
+    : `${model.split("/").pop().replace("whisper-", "")} · ${r.device.toUpperCase()} (${r.dtype.replace(/[{}"]/g, "").replace(/_model(_merged)?/g, "")})`;
   if (r.device === "wasm") ui.S.model += ` · ${r.threads}스레드`;
   addLog(`✅ 음성 인식 엔진 준비 완료 → ${ui.S.model}${r.device === "wasm" && r.threads <= 1 ? " (멀티스레드 비활성: 페이지를 한 번 새로고침하면 켜질 수 있음)" : ""}`);
   return r;
@@ -678,6 +887,78 @@ async function ensureAsr(model, device) {
 async function transcribeChunk(pcm) {
   const r = await asrCall({ type: "transcribe", pcm }, [pcm.buffer]);
   return r.chunks;
+}
+
+// 고속 모드 VAD 전용 Worker (같은 Worker 스크립트를 VAD만 쓰는 별도 인스턴스로 실행, 1스레드)
+let vadWorker = null, vadCall = null;
+async function ensureVad() {
+  if (vadCall) return;
+  vadWorker = workerFromScript("asr_worker_src", "module");
+  vadCall = makeRpc(vadWorker);
+  try { await vadCall({ type: "load_vad" }); }
+  catch (e) { vadWorker.terminate(); vadWorker = null; vadCall = null; throw new Error(`대사 감지(VAD) 모델 로드 실패: ${errMsg(e)}`); }
+}
+
+// 고속 모드 파이프라인: 구간 w의 대사 인식(인식 Worker) 중에 구간 w+1의 오디오 추출(FFmpeg Worker)과
+// 대사 감지(VAD Worker)를 동시에 진행 → VAD·추출 시간이 인식 시간 뒤에 숨음.
+// 구간 끝에 걸친 대사는 VAD가 tailStart로 돌려주고, 다음 구간을 그 대사 시작점에서 다시 읽어 잘림·중복을 막음.
+async function transcribeFast(source) {
+  const duration = source.duration;
+  const sens = vadSensSelect.value;
+  const segments = [];
+  let speechTotal = 0, w = 0;
+
+  // 구간 하나를 읽고 대사 감지까지 수행 → { offset, end, pcm, segs, next } (더 읽을 게 없으면 null)
+  async function prepare(offset, emptyReads = 0) {
+    while (offset < duration - 0.3) {
+      const sliceEnd = Math.min(duration, offset + WINDOW_SEC);
+      const isLast = sliceEnd >= duration - 0.01;
+      const pcm = await source.read(offset, sliceEnd);
+      const realEnd = offset + pcm.length / SR;
+      const short = realEnd < sliceEnd - 1; // 컨테이너 길이 정보보다 실제 오디오가 짧음(일부 TS)
+      if (pcm.length < SR * 0.5) {
+        if (++emptyReads >= 2 || isLast) return null;
+        offset = sliceEnd; continue;
+      }
+      const copy = pcm.slice(); // VAD Worker로 넘길 사본 (원본은 인식 Worker로)
+      const tv = performance.now();
+      const v = await vadCall({ type: "vad", pcm: copy, isLast: isLast || short, sens }, [copy.buffer]);
+      v.ms = performance.now() - tv;
+      let next = v.tailStart !== null && v.tailStart !== undefined ? offset + Math.max(1, v.tailStart - 0.3) : (short ? realEnd : sliceEnd);
+      if (isLast) next = duration;
+      return { offset, end: sliceEnd, pcm, segs: v.segs, next, vadMs: v.ms };
+    }
+    return null;
+  }
+
+  let cur = await prepare(0);
+  while (cur) {
+    const nextP = cur.next < duration - 0.3 ? prepare(cur.next) : Promise.resolve(null);
+    nextP.catch(() => {}); // 오류는 아래 await에서 처리
+    const base = cur.offset, winLen = cur.end - cur.offset, wi = w;
+    Object.assign(fastProg, { stage: "asr", done: 0, total: cur.segs.length });
+    ui.frac(base / duration, () => {
+      ui.label(`[2/3] 구간 ${wi + 1}: 대사 인식 ${fastProg.done}/${fastProg.total} (${fmtDur(base)} ~ ${fmtDur(cur.end)} / ${fmtDur(duration)})`);
+      return (base + (fastProg.total ? fastProg.done / fastProg.total : 1) * winLen) / duration;
+    });
+    const ta = performance.now();
+    let sp = 0;
+    if (cur.segs.length) {
+      const r = await asrCall({ type: "asr_segments", pcm: cur.pcm, segs: cur.segs }, [cur.pcm.buffer]);
+      for (const c of r.cues) segments.push({ start: cur.offset + c.start, end: cur.offset + c.end, text: c.text });
+      speechTotal += r.speechSec; sp = r.speechSec;
+    }
+    const asrMs = performance.now() - ta;
+    const nSegs = cur.segs.length, vadMs = cur.vadMs;
+    const tw = performance.now();
+    cur = await nextP;
+    const waitMs = performance.now() - tw; // 인식이 끝난 뒤 다음 구간 준비(추출+대사 감지)를 추가로 기다린 시간
+    addLog(`  · 구간 ${wi + 1} (${fmtDur(base)}~${fmtDur(base + winLen)}): 대사 ${nSegs}개(${sp.toFixed(0)}초) · 대사 감지 ${(vadMs / 1000).toFixed(1)}초 · 인식 ${(asrMs / 1000).toFixed(1)}초 · 다음 구간 대기 ${(waitMs / 1000).toFixed(1)}초`);
+    w++;
+  }
+  ui.frac(1);
+  addLog(`  · 감지된 대사 구간 합계 ${fmtDur(speechTotal)} / 전체 ${fmtDur(duration)} (나머지는 무음·비대사로 건너뜀)`);
+  return segments;
 }
 
 // ───────────────────────── 오디오 소스 ─────────────────────────
@@ -1324,9 +1605,12 @@ async function processFile(file, idx, total, opts) {
   try {
     setStatus("음성 인식 중...");
     ui.stageSet("asr", "[2/3] 음성 인식 시작", 0);
-    addLog(`  - [2/3] 일본어 음성 인식 (${WINDOW_SEC}초 구간 · 경계 동적 정렬)`);
+    const fastMode = !!(asrInfo && asrInfo.fast);
+    addLog(fastMode
+      ? `  - [2/3] 일본어 음성 인식 (고속 모드: ${WINDOW_SEC}초 구간 · 대사 구간만 인식)`
+      : `  - [2/3] 일본어 음성 인식 (${WINDOW_SEC}초 구간 · 경계 동적 정렬)`);
     store.set(CRASH_KEY, JSON.stringify({ phase: "asr", model: asrLoadedKey.split("|")[0], device: asrInfo ? asrInfo.device : "", t: Date.now() }));
-    segments = await transcribeAdaptive(source);
+    segments = fastMode ? await transcribeFast(source) : await transcribeAdaptive(source);
   } finally {
     clearCrashMark();
     await source.close(); // PCM/마운트 해제
@@ -1368,7 +1652,8 @@ startBtn.addEventListener("click", async () => {
   setBusy(true);
   let ok = 0, fail = 0;
   try {
-    await ensureAsr(modelSelect.value, deviceSelect.value);
+    if (engineSelect.value === "fast") await ensureAsr(FAST_MODEL, "wasm");
+    else await ensureAsr(modelSelect.value, deviceSelect.value);
     for (let i = 0; i < files.length; i++) {
       try { await processFile(files[i], i, files.length, { batchLines, gemini }); ok++; }
       catch (err) {
