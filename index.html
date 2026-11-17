@@ -60,8 +60,8 @@
       <div>
         <label>🎙️ Whisper 모델 (최초 1회 다운로드 후 캐시)</label>
         <select id="whisper_model">
-          <option value="onnx-community/whisper-base">Whisper Base (가벼움 · 태블릿 장편용)</option>
-          <option value="onnx-community/whisper-small" selected>Whisper Small (균형 · 권장)</option>
+          <option value="onnx-community/whisper-base">Whisper Base (가벼움 · 태블릿 권장 · 약 75MB)</option>
+          <option value="onnx-community/whisper-small" selected>Whisper Small (정확 · 노트북 권장 · 약 240MB, 태블릿은 메모리 부족 가능)</option>
           <option value="onnx-community/whisper-large-v3-turbo">Whisper Large-v3 Turbo (최고 정확도 · 노트북 WebGPU 전용)</option>
           <option value="onnx-community/whisper-tiny">Whisper Tiny (초고속 테스트용)</option>
         </select>
@@ -169,6 +169,9 @@ async function load(model, device) {
   const files = {};
   const p = await pipeline("automatic-speech-recognition", model, {
     device, dtype,
+    // WASM: ORT의 CPU 메모리 아레나/메모리 패턴 사전 할당을 끄면 최대 메모리 사용량이 크게 줄어듦
+    // (모바일 Chrome은 탭 메모리가 한계를 넘으면 '웹페이지를 표시하는 중 문제 발생'으로 강제 종료)
+    session_options: device === "wasm" ? { enableCpuMemArena: false, enableMemPattern: false } : {},
     progress_callback: (x) => {
       if (x.status === "progress" && x.file && x.total) {
         files[x.file] = { loaded: x.loaded || 0, total: x.total };
@@ -337,6 +340,39 @@ restoreSelect(modelSelect, "sub_whisper_model");
 restoreSelect(deviceSelect, "sub_asr_device");
 restoreSelect(batchSelect, "sub_batch_size");
 
+// 태블릿/폰은 첫 사용 시 메모리 여유가 큰 Base를 기본값으로
+const MOBILE_UA = (navigator.userAgentData && navigator.userAgentData.mobile) || /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+if (MOBILE_UA && !store.get("sub_whisper_model")) modelSelect.value = "onnx-community/whisper-base";
+
+// 지난 실행이 모델 로드/처리 중에 탭 강제 종료(메모리 부족)로 끝났는지 감지 → 더 가벼운 설정으로 자동 전환
+const CRASH_KEY = "sub_inflight";
+function clearCrashMark() { try { localStorage.removeItem(CRASH_KEY); } catch {} }
+const DOWNGRADE = {
+  "onnx-community/whisper-large-v3-turbo": "onnx-community/whisper-small",
+  "onnx-community/whisper-small": "onnx-community/whisper-base",
+  "onnx-community/whisper-base": "onnx-community/whisper-tiny"
+};
+let crashNotice = null;
+try {
+  const prev = JSON.parse(store.get(CRASH_KEY) || "null");
+  if (prev && prev.model) {
+    const name = prev.model.split("/").pop();
+    const lighter = DOWNGRADE[prev.model];
+    const where = prev.phase === "load" ? "모델 로드/워밍업" : "음성 인식";
+    if (prev.device === "webgpu") {
+      store.set("sub_webgpu_bad_" + prev.model, "1");
+      crashNotice = `⚠️ 지난번 ${name} 모델의 ${where} 중 브라우저 탭이 강제 종료되었습니다(WebGPU). 이번에는 자동 모드에서 WASM을 사용합니다.`;
+    } else if (lighter && modelSelect.value === prev.model) {
+      modelSelect.value = lighter;
+      store.set("sub_whisper_model", lighter);
+      crashNotice = `⚠️ 지난번 ${name} 모델의 ${where} 중 브라우저 탭이 강제 종료되었습니다(메모리 부족 추정). 더 가벼운 ${lighter.split("/").pop()} 모델로 바꿨습니다. 다른 탭·앱을 닫으면 도움이 됩니다.`;
+    } else {
+      crashNotice = `⚠️ 지난번 ${name} 모델의 ${where} 중 브라우저 탭이 강제 종료되었습니다(메모리 부족 추정). 다른 탭·앱을 닫고, 더 가벼운 모델로 다시 시도해 보세요.`;
+    }
+  }
+} catch {}
+clearCrashMark();
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const errMsg = (e) => (e && e.message) ? e.message : String(e);
@@ -387,6 +423,7 @@ function handleFiles(fileList) {
 }
 
 // 로그: 줄 단위 노드 추가/삭제만 수행 (전체 텍스트 재작성으로 인한 깜빡임·O(n²) 비용 제거)
+setTimeout(() => { if (crashNotice) addLog(crashNotice); }, 0);
 function addLog(msg) {
   const ts = new Date().toTimeString().split(" ")[0];
   const stick = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 30;
@@ -589,10 +626,14 @@ async function ensureAsr(model, device) {
   let r = null, lastErr = null;
   for (const d of order) {
     try {
+      // 탭이 강제 종료되면 JS가 아무것도 남길 수 없으므로, 시작 전에 표시를 남기고 성공하면 지움 → 다음 접속 때 감지
+      store.set(CRASH_KEY, JSON.stringify({ phase: "load", model, device: d, t: Date.now() }));
       r = await loadAsrOnce(model, d);
+      clearCrashMark();
       if (d === "webgpu") try { localStorage.removeItem(gpuBadKey(model)); } catch {}
       break;
     } catch (e) {
+      clearCrashMark();
       lastErr = e;
       killAsrWorker();
       if (d === "webgpu") store.set(gpuBadKey(model), "1"); // 다음부터 자동 모드는 바로 WASM
@@ -1256,8 +1297,10 @@ async function processFile(file, idx, total, opts) {
     setStatus("음성 인식 중...");
     ui.stageSet("asr", "[2/3] 음성 인식 시작", 0);
     addLog(`  - [2/3] 일본어 음성 인식 (${WINDOW_SEC}초 구간 · 경계 동적 정렬)`);
+    store.set(CRASH_KEY, JSON.stringify({ phase: "asr", model: asrLoadedKey.split("|")[0], device: asrInfo ? asrInfo.device : "", t: Date.now() }));
     segments = await transcribeAdaptive(source);
   } finally {
+    clearCrashMark();
     await source.close(); // PCM/마운트 해제
   }
 
