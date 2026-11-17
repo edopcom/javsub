@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>온디바이스 Whisper + Gemini 자막기 (검증 패치판)</title>
+<title>온디바이스 Whisper + Gemini 자막기</title>
 <style>
   :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --accent: #3b82f6; --green: #10b981; --text: #f8fafc; --sub: #94a3b8; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 16px; }
-  .container { max-width: 780px; margin: 0 auto; }
+  .container { max-width: 800px; margin: 0 auto; }
   h2 { margin: 0 0 8px 0; font-size: 1.35rem; }
-  .desc { color: var(--sub); font-size: 0.86rem; margin-bottom: 16px; line-height: 1.4; }
+  .desc { color: var(--sub); font-size: 0.86rem; margin-bottom: 16px; line-height: 1.45; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
   .card h3 { margin: 0 0 12px 0; font-size: 1.02rem; color: #93c5fd; }
   label { display: block; font-size: 0.84rem; color: var(--sub); margin-bottom: 6px; }
@@ -19,57 +19,79 @@
   }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   @media (max-width: 600px) { .row { grid-template-columns: 1fr; } }
-  .btn {
-    background: var(--accent); color: #fff; border: none; padding: 10px 16px;
-    border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.92rem;
-  }
+  .btn { background: var(--accent); color: #fff; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.92rem; }
   .btn:disabled { background: #475569; cursor: not-allowed; }
   .btn-start { background: var(--green); width: 100%; padding: 14px; font-size: 1.05rem; margin-top: 10px; }
-  .drop-zone {
-    border: 2px dashed #475569; border-radius: 10px; padding: 24px; text-align: center;
-    cursor: pointer; background: rgba(15, 23, 42, 0.5); transition: border-color 0.2s;
-  }
+  .drop-zone { border: 2px dashed #475569; border-radius: 10px; padding: 24px; text-align: center; cursor: pointer; background: rgba(15, 23, 42, 0.5); transition: border-color 0.2s; }
   .drop-zone:hover { border-color: var(--accent); }
+  .drop-zone.busy { opacity: 0.5; cursor: not-allowed; }
   .file-list { margin-top: 12px; font-size: 0.88rem; }
   .file-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); gap: 8px; }
+  .fstatus { color: #94a3b8; white-space: nowrap; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   .badge { padding: 4px 8px; border-radius: 6px; font-size: 0.78rem; background: #065f46; color: #6ee7b7; text-decoration: none; white-space: nowrap; }
-  .bar-bg { background: #0f172a; height: 22px; border-radius: 8px; overflow: hidden; position: relative; margin: 8px 0 12px 0; border: 1px solid var(--border); }
-  .bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #3b82f6, #10b981); transition: width 0.3s; }
-  .bar-txt { position: absolute; width: 100%; top: 0; line-height: 22px; text-align: center; font-size: 0.8rem; font-weight: bold; text-shadow: 0 1px 2px #000; }
-  .log-box { background: #090d16; color: #4ade80; font-family: monospace; font-size: 0.82rem; padding: 12px; border-radius: 8px; height: 240px; overflow-y: auto; white-space: pre-wrap; border: 1px solid var(--border); }
+  .badge.sub { background: #1e3a8a; color: #bfdbfe; }
+  .bar-label { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--sub); margin-top: 6px; gap: 8px; }
+  .bar-label span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-bg { background: #0f172a; height: 18px; border-radius: 8px; overflow: hidden; margin: 4px 0 8px 0; border: 1px solid var(--border); }
+  .bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #3b82f6, #10b981); transition: width 0.25s linear; will-change: width; }
+  .bar-fill.stage { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 12px; font-size: 0.8rem; margin: 8px 0 12px 0; }
+  @media (max-width: 600px) { .stats { grid-template-columns: 1fr 1fr; } }
+  .stats div { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+  .stats b { display: block; color: var(--sub); font-weight: 500; font-size: 0.72rem; margin-bottom: 2px; }
+  .stats span { display: block; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stats .wide { grid-column: 1 / -1; }
+  .log-box { background: #090d16; color: #4ade80; font-family: monospace; font-size: 0.8rem; padding: 12px; border-radius: 8px; height: 240px; overflow-y: auto; white-space: pre-wrap; border: 1px solid var(--border); }
+  .log-box div { min-height: 1em; }
 </style>
 </head>
 <body>
 <div class="container">
-  <h2>🎬 온디바이스 Whisper + Gemini 자막기 (검증 패치판)</h2>
+  <h2>🎬 온디바이스 Whisper + Gemini 자막기</h2>
   <div class="desc">
-    • <strong>싱크 정밀화:</strong> 5초 오버랩 슬라이딩 윈도우 적용으로 구간 경계 대사 누락 방지<br>
-    • <strong>안정성 강화:</strong> GitHub Pages CORS 호환 디코더, API 자동 재시도(429 방어), 메모리 자동 해제 적용
+    • <strong>음성 인식은 100% 브라우저 내부</strong> (WebGPU 가속, 미지원 시 WASM) · Web Worker에서 실행되어 화면이 멈추지 않음<br>
+    • <strong>대용량·MKV 대응:</strong> FFmpeg.wasm이 파일을 통째로 읽지 않고 5분 구간씩만 16kHz로 추출 (AC3/DTS/5.1ch 포함)<br>
+    • <strong>싱크 보존:</strong> 구간 경계를 대사 사이 쉼에 맞춤 · 번역은 줄 ID로만 매칭하고 타임코드는 로컬 원본 유지
   </div>
 
   <div class="card">
-    <h3>1. 모델 및 API 설정 (기기 브라우저에 영구 저장됨)</h3>
+    <h3>1. 모델 및 API 설정 (이 브라우저에 저장됨)</h3>
     <div class="row">
       <div>
-        <label>🎙️ 로컬 Whisper 모델 (최초 1회 다운로드 후 캐시)</label>
+        <label>🎙️ Whisper 모델 (최초 1회 다운로드 후 캐시)</label>
         <select id="whisper_model">
-          <option value="Xenova/whisper-base">Whisper Base (가벼움 · 태블릿/장편 추천 · 145MB)</option>
-          <option value="Xenova/whisper-small" selected>Whisper Small (고정밀 싱크 · 노트북 추천 · 480MB)</option>
-          <option value="Xenova/whisper-tiny">Whisper Tiny (초고속 테스트용 · 75MB)</option>
+          <option value="onnx-community/whisper-base">Whisper Base (가벼움 · 태블릿 장편용)</option>
+          <option value="onnx-community/whisper-small" selected>Whisper Small (균형 · 권장)</option>
+          <option value="onnx-community/whisper-large-v3-turbo">Whisper Large-v3 Turbo (최고 정확도 · 노트북 WebGPU 전용)</option>
+          <option value="onnx-community/whisper-tiny">Whisper Tiny (초고속 테스트용)</option>
         </select>
       </div>
       <div>
+        <label>⚙️ 연산 장치</label>
+        <select id="asr_device">
+          <option value="auto" selected>자동 (WebGPU 가능하면 사용, 실패 시 WASM)</option>
+          <option value="webgpu">WebGPU 강제 (GPU 가속)</option>
+          <option value="wasm">WASM 강제 (CPU · 호환성 최고)</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
         <label>🌐 Gemini 번역 묶음 크기 (API 호출 최소화)</label>
         <select id="batch_size">
-          <option value="300" selected>300줄씩 묶어 호출 (25분 영상 = API 1회 · 권장)</option>
-          <option value="200">200줄씩 묶어 호출 (장편 안정 모드)</option>
-          <option value="450">450줄 대량 묶음 호출 (초절약 모드)</option>
+          <option value="300" selected>300줄씩 (25분 영상 ≈ API 1회 · 권장)</option>
+          <option value="450">450줄씩 (장편 초절약 · 1시간 ≈ 1~2회)</option>
+          <option value="200">200줄씩 (응답 잘림이 잦을 때)</option>
         </select>
+      </div>
+      <div>
+        <label>🤖 Gemini 모델 ID</label>
+        <input type="text" id="gemini_model" placeholder="gemini-2.5-flash" autocomplete="off" spellcheck="false">
       </div>
     </div>
     <label>🔑 Gemini API 키 (비워두면 API 0회 호출로 일본어 원문 SRT만 생성)</label>
     <div style="display:flex; gap:8px;">
-      <input type="password" id="api_key" placeholder="AIzaSy..." style="margin-bottom:0;">
+      <input type="password" id="api_key" placeholder="AIzaSy..." style="margin-bottom:0;" autocomplete="off">
       <button class="btn" id="btn_toggle_key" type="button" style="background:#475569; white-space:nowrap;">보기</button>
       <button class="btn" id="btn_save_cfg" type="button" style="white-space:nowrap;">저장</button>
     </div>
@@ -79,325 +101,1202 @@
     <h3>2. 동영상 파일 선택 (다중 선택 가능)</h3>
     <div class="drop-zone" id="drop_zone">
       📂 여기를 터치(클릭)하거나 동영상 파일을 끌어다 놓으세요
-      <input type="file" id="file_input" multiple accept="video/*,audio/*,.mkv,.ts,.avi,.tp" style="display:none;">
+      <input type="file" id="file_input" multiple accept="video/*,audio/*,.mkv,.ts,.m2ts,.avi,.tp,.wmv,.flv" style="display:none;">
     </div>
     <div class="file-list" id="file_list">선택된 파일이 없습니다.</div>
     <button class="btn btn-start" id="btn_start" disabled>선택한 동영상 일괄 자막 생성 시작</button>
   </div>
 
   <div class="card">
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-      <h3 style="margin:0;">3. 실시간 처리 상태</h3>
-      <span id="time_info" style="font-size:0.85rem; color:#fbbf24;">대기 중</span>
+    <h3>3. 실시간 처리 상태</h3>
+    <div class="bar-label"><span id="overall_label">전체 진행률</span><span id="overall_pct">0%</span></div>
+    <div class="bar-bg"><div class="bar-fill" id="overall_fill"></div></div>
+    <div class="bar-label"><span id="stage_label">현재 단계 대기 중</span><span id="stage_pct">0%</span></div>
+    <div class="bar-bg"><div class="bar-fill stage" id="stage_fill"></div></div>
+    <div class="stats">
+      <div><b>현재 파일</b><span id="st_file">-</span></div>
+      <div><b>경과 시간</b><span id="st_elapsed">-</span></div>
+      <div><b>남은 시간 (파일 / 전체)</b><span id="st_eta">-</span></div>
+      <div><b>음성 인식 모델</b><span id="st_model">-</span></div>
+      <div><b>오디오 추출 방식</b><span id="st_audio">-</span></div>
+      <div><b>Gemini 호출</b><span id="st_api">0회</span></div>
     </div>
-    <div class="bar-bg">
-      <div class="bar-fill" id="prog_fill"></div>
-      <div class="bar-txt" id="prog_txt">대기 중 (0%)</div>
-    </div>
-    <div class="log-box" id="log_box">대기 중입니다. 동영상을 선택하고 시작을 누르세요.</div>
+    <div class="log-box" id="log_box"><div>대기 중입니다. 동영상을 선택하고 시작을 누르세요.</div></div>
   </div>
 </div>
 
-<script type="module">
-import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
+<!-- ───────── 음성 인식 Worker (module) : 메인 스레드를 막지 않도록 분리 ───────── -->
+<script type="text/plain" id="asr_worker_src">
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
 env.allowLocalModels = false;
+env.useBrowserCache = true;
 
-const apiKeyInput = document.getElementById("api_key");
-const modelSelect = document.getElementById("whisper_model");
-const batchSelect = document.getElementById("batch_size");
-const fileInput = document.getElementById("file_input");
-const dropZone = document.getElementById("drop_zone");
-const fileListDiv = document.getElementById("file_list");
-const startBtn = document.getElementById("btn_start");
-const logBox = document.getElementById("log_box");
-const progFill = document.getElementById("prog_fill");
-const progTxt = document.getElementById("prog_txt");
-const timeInfo = document.getElementById("time_info");
+let asr = null;
+let loadedKey = "";
+
+async function webgpuInfo() {
+  try {
+    if (!self.navigator || !navigator.gpu) return null;
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return null;
+    return { f16: adapter.features.has("shader-f16") };
+  } catch (e) { return null; }
+}
+
+function dtypeFor(model, device, gpu) {
+  if (device === "wasm") return "q8";
+  // 인코더는 정밀도에 민감(싱크·인식률) → fp32, 큰 모델만 fp16. 디코더는 q4로 VRAM 절약.
+  const big = /large/.test(model);
+  return { encoder_model: big ? (gpu && gpu.f16 ? "fp16" : "fp32") : "fp32", decoder_model_merged: "q4" };
+}
+
+async function load(model, wanted) {
+  const key = model + "|" + wanted;
+  if (asr && loadedKey === key) return { device: asr.__device, dtype: asr.__dtype, cached: true };
+  if (asr) { try { await asr.dispose(); } catch (e) {} asr = null; loadedKey = ""; }
+
+  const gpu = await webgpuInfo();
+  const candidates = wanted === "wasm" ? ["wasm"] : wanted === "webgpu" ? ["webgpu"] : (gpu ? ["webgpu", "wasm"] : ["wasm"]);
+  let lastErr = null;
+  for (const device of candidates) {
+    if (device === "webgpu" && !gpu) { lastErr = new Error("이 브라우저/기기에서 WebGPU를 사용할 수 없음"); continue; }
+    if (device === "wasm" && /large/.test(model)) { lastErr = lastErr || new Error("Large 모델은 WASM에서 너무 느리고 메모리가 부족함 (WebGPU 필요)"); continue; }
+    const dtype = dtypeFor(model, device, gpu);
+    try {
+      self.postMessage({ type: "status", text: "모델 로드 시도: " + device.toUpperCase() });
+      const files = {};
+      const p = await pipeline("automatic-speech-recognition", model, {
+        device, dtype,
+        progress_callback: (x) => {
+          if (x.status === "progress" && x.file && x.total) {
+            files[x.file] = { loaded: x.loaded || 0, total: x.total };
+            let l = 0, t = 0;
+            for (const k in files) { l += files[k].loaded; t += files[k].total; }
+            self.postMessage({ type: "load_progress", frac: t ? l / t : 0, mb: Math.round(t / 1048576) });
+          }
+        }
+      });
+      // 첫 실행에서 셰이더 컴파일/커널 오류·멈춤이 나는 GPU가 있으므로 1초 무음으로 워밍업 검증 (메인 스레드가 시간 제한 감시)
+      self.postMessage({ type: "warmup", device });
+      await p(new Float32Array(16000), { language: "japanese", task: "transcribe", max_new_tokens: 8 });
+      p.__device = device; p.__dtype = typeof dtype === "string" ? dtype : JSON.stringify(dtype);
+      asr = p; loadedKey = key;
+      return { device, dtype: p.__dtype, cached: false };
+    } catch (e) {
+      lastErr = e;
+      self.postMessage({ type: "status", text: device.toUpperCase() + " 로드 실패: " + (e && e.message ? e.message : e) });
+    }
+  }
+  throw lastErr || new Error("모델 로드 실패");
+}
+
+self.onmessage = async (ev) => {
+  const m = ev.data;
+  try {
+    if (m.type === "load") {
+      const r = await load(m.model, m.device);
+      self.postMessage({ type: "loaded", id: m.id, ...r });
+    } else if (m.type === "transcribe") {
+      const out = await asr(m.pcm, {
+        language: "japanese", task: "transcribe",
+        return_timestamps: true, chunk_length_s: 30, stride_length_s: 5
+      });
+      const chunks = (out && out.chunks ? out.chunks : []).map((c) => ({ text: c.text, timestamp: [c.timestamp[0], c.timestamp[1]] }));
+      self.postMessage({ type: "result", id: m.id, chunks });
+    } else if (m.type === "dispose") {
+      if (asr) { try { await asr.dispose(); } catch (e) {} }
+      asr = null; loadedKey = "";
+      self.postMessage({ type: "disposed", id: m.id });
+    }
+  } catch (e) {
+    self.postMessage({ type: "error", id: m.id, message: e && e.message ? e.message : String(e) });
+  }
+};
+</script>
+
+<!-- ───────── FFmpeg.wasm Worker (classic, 단일 스레드 코어) ─────────
+     GitHub Pages는 COOP/COEP 헤더를 못 넣어 SharedArrayBuffer(멀티스레드 코어)를 쓸 수 없음 → 단일 스레드 @ffmpeg/core 사용.
+     @ffmpeg/ffmpeg 래퍼는 CDN에서 불러오면 교차 출처 Worker 생성이 막히므로, 코어를 Blob Worker에서 importScripts로 직접 구동.
+     WORKERFS 마운트: 파일을 메모리에 복사하지 않고 필요한 부분만 FileReaderSync로 읽음 → 수 GB MKV도 OOM 없이 처리. -->
+<script type="text/plain" id="ff_worker_src">
+var core = null;
+var logs = [];
+var mounted = false;
+
+function run(args) {
+  logs = [];
+  core.reset();
+  core.exec.apply(null, args);
+  var ret = core.ret;
+  core.reset();
+  return ret;
+}
+
+function unmount() {
+  if (mounted) { try { core.FS.unmount("/in"); } catch (e) {} mounted = false; }
+}
+
+self.onmessage = async function (ev) {
+  var m = ev.data;
+  try {
+    if (m.type === "init") {
+      if (!core) {
+        importScripts(m.coreURL);
+        core = await self.createFFmpegCore({
+          mainScriptUrlOrBlob: m.coreURL + "#" + btoa(JSON.stringify({ wasmURL: m.wasmURL, workerURL: "" }))
+        });
+        core.setLogger(function (d) { if (d && d.message) { logs.push(d.message); if (logs.length > 400) logs.shift(); } });
+        core.setProgress(function () {});
+        try { core.FS.mkdir("/in"); } catch (e) {}
+      }
+      self.postMessage({ type: "ok", id: m.id });
+    } else if (m.type === "open") {
+      unmount();
+      core.FS.mount(core.FS.filesystems.WORKERFS, { files: [m.file] }, "/in");
+      mounted = true;
+      run(["-hide_banner", "-i", "/in/" + m.file.name]);
+      self.postMessage({ type: "probe", id: m.id, log: logs.join("\n") });
+    } else if (m.type === "scan_duration") {
+      // 컨테이너에 길이 정보가 없을 때(일부 TS) 오디오만 끝까지 디코딩해 길이 측정
+      run(["-hide_banner", "-i", "/in/" + m.name, "-map", m.map, "-vn", "-f", "null", "-"]);
+      self.postMessage({ type: "probe", id: m.id, log: logs.join("\n") });
+    } else if (m.type === "extract") {
+      var args = ["-hide_banner", "-nostdin", "-loglevel", "error"];
+      if (m.start > 0) args.push("-ss", m.start.toFixed(3));
+      args.push("-i", "/in/" + m.name, "-t", m.dur.toFixed(3), "-map", m.map, "-vn", "-sn", "-dn",
+        "-ac", "1", "-ar", "16000", "-f", "f32le", "-y", "/out.pcm");
+      var ret = run(args);
+      var data = null;
+      try { data = core.FS.readFile("/out.pcm"); } catch (e) {}
+      try { core.FS.unlink("/out.pcm"); } catch (e) {}
+      var expected = Math.floor(m.dur * 16000) * 4;
+      // 실패 코드인데 결과도 크게 모자라면 불완전 출력 → 오류. (손상 프레임 몇 개로 ret≠0이어도 거의 다 나왔으면 사용)
+      if (!data || (ret !== 0 && data.byteLength < expected * 0.9 && !m.nearEnd)) {
+        throw new Error("FFmpeg 추출 실패 (ret=" + ret + ", " + (data ? data.byteLength : 0) + "/" + expected + "B) " + logs.slice(-3).join(" | "));
+      }
+      var bytes = data.byteLength - (data.byteLength % 4);
+      var buf = (data.byteOffset % 4 === 0) ? data.buffer.slice(data.byteOffset, data.byteOffset + bytes) : data.slice(0, bytes).buffer;
+      self.postMessage({ type: "pcm", id: m.id, buf: buf }, [buf]);
+    } else if (m.type === "close") {
+      unmount();
+      self.postMessage({ type: "ok", id: m.id });
+    }
+  } catch (e) {
+    self.postMessage({ type: "error", id: m.id, message: (e && e.message) ? e.message : String(e) });
+  }
+};
+</script>
+
+<script type="module">
+// ───────────────────────── 상수 ─────────────────────────
+const params = new URLSearchParams(location.search);       // 디버그용: ?window=60&audio=ffmpeg
+const SR = 16000;
+const WINDOW_SEC = Number.isFinite(Number(params.get("window"))) && params.get("window") ? Math.min(300, Math.max(10, Number(params.get("window")))) : 300; // 인식 매크로 구간
+const SAFE_TAIL_SEC = Math.min(8, WINDOW_SEC * 0.1);         // 구간 끝 근처 대사는 잘렸을 수 있음 → 다음 구간에서 재인식
+const MIN_ADVANCE_SEC = WINDOW_SEC * 0.2;                    // 무한 루프 방지 최소 전진
+const MAX_CUE_SEC = 8;
+const MIN_CUE_SEC = 0.8;
+const FORCE_AUDIO = params.get("audio");                     // "ffmpeg" | "webaudio" | "realtime"
+// Web Audio는 파일 전체(ArrayBuffer) + 전 채널 디코딩 버퍼(5.1ch면 6배)를 동시에 메모리에 올림 → 짧고 작은 파일만 허용
+// (15분·6ch·16kHz ≈ 350MB + 원본). 그 외는 메모리 사용량이 길이와 무관한 FFmpeg 구간 스트리밍.
+const DEVICE_GB = navigator.deviceMemory || 4;
+const WEBAUDIO_MAX_BYTES = (DEVICE_GB >= 8 ? 120 : 60) * 1048576;
+const WEBAUDIO_MAX_SEC = DEVICE_GB >= 8 ? 15 * 60 : 8 * 60;
+const REALTIME_MAX_SEC = 3 * 3600;                          // 실시간 캡처는 전체 PCM을 보관(1시간 ≈ 230MB)
+const FFMPEG_ONLY_EXT = /\.(mkv|ts|tp|m2ts|mts|avi|wmv|flv|vob|mpg|mpeg)$/i;
+const FF_CORE_BASES = [
+  "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd",
+  "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd"
+];
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_TIMEOUT_MS = 420000;
+const GEMINI_MAX_ATTEMPTS = 5;
+const GEMINI_MAX_WAIT_SEC = 120;
+const LOG_MAX_LINES = 500;
+
+// ───────────────────────── DOM ─────────────────────────
+const $ = (id) => document.getElementById(id);
+const apiKeyInput = $("api_key"), geminiModelInput = $("gemini_model"), modelSelect = $("whisper_model");
+const deviceSelect = $("asr_device"), batchSelect = $("batch_size"), fileInput = $("file_input");
+const dropZone = $("drop_zone"), fileListDiv = $("file_list"), startBtn = $("btn_start"), logBox = $("log_box");
 
 let selectedFiles = [];
-let transcriber = null;
-let loadedModelName = "";
+let isProcessing = false;
+let outputUrls = [];
+let wakeLock = null;
 
-apiKeyInput.value = localStorage.getItem("sub_gemini_key") || "";
-if (localStorage.getItem("sub_whisper_model")) modelSelect.value = localStorage.getItem("sub_whisper_model");
-if (localStorage.getItem("sub_batch_size")) batchSelect.value = localStorage.getItem("sub_batch_size");
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); return true; } catch { return false; } }
+};
+function restoreSelect(sel, key) {
+  const v = store.get(key);
+  if (v && [...sel.options].some((o) => o.value === v)) sel.value = v; // 옛 버전 값(Xenova/...)이 저장돼 있어도 깨지지 않게
+}
+apiKeyInput.value = store.get("sub_gemini_key") || "";
+geminiModelInput.value = store.get("sub_gemini_model") || DEFAULT_GEMINI_MODEL;
+restoreSelect(modelSelect, "sub_whisper_model");
+restoreSelect(deviceSelect, "sub_asr_device");
+restoreSelect(batchSelect, "sub_batch_size");
 
-document.getElementById("btn_toggle_key").addEventListener("click", function() {
-  if (apiKeyInput.type === "password") {
-    apiKeyInput.type = "text";
-    this.textContent = "숨김";
-  } else {
-    apiKeyInput.type = "password";
-    this.textContent = "보기";
-  }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const errMsg = (e) => (e && e.message) ? e.message : String(e);
+
+function saveSettings() {
+  return [
+    store.set("sub_gemini_key", apiKeyInput.value.trim()),
+    store.set("sub_gemini_model", geminiModelInput.value.trim() || DEFAULT_GEMINI_MODEL),
+    store.set("sub_whisper_model", modelSelect.value),
+    store.set("sub_asr_device", deviceSelect.value),
+    store.set("sub_batch_size", batchSelect.value)
+  ].every(Boolean);
+}
+$("btn_toggle_key").addEventListener("click", function () {
+  const hidden = apiKeyInput.type === "password";
+  apiKeyInput.type = hidden ? "text" : "password";
+  this.textContent = hidden ? "숨김" : "보기";
 });
-
-document.getElementById("btn_save_cfg").addEventListener("click", () => {
-  localStorage.setItem("sub_gemini_key", apiKeyInput.value.trim());
-  localStorage.setItem("sub_whisper_model", modelSelect.value);
-  localStorage.setItem("sub_batch_size", batchSelect.value);
-  addLog("✅ 설정이 현재 브라우저에 영구 저장되었습니다.");
+$("btn_save_cfg").addEventListener("click", () => {
+  addLog(saveSettings() ? "✅ 설정이 이 브라우저에 저장되었습니다." : "⚠️ 이 브라우저(사생활 보호 모드 등)에서는 설정을 저장할 수 없습니다.");
 });
+[modelSelect, deviceSelect, batchSelect].forEach((s) => s.addEventListener("change", saveSettings));
 
-dropZone.addEventListener("click", () => fileInput.click());
-dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.style.borderColor = "#10b981"; });
+dropZone.addEventListener("click", () => { if (!isProcessing) fileInput.click(); });
+dropZone.addEventListener("dragover", (e) => { e.preventDefault(); if (!isProcessing) dropZone.style.borderColor = "#10b981"; });
 dropZone.addEventListener("dragleave", () => { dropZone.style.borderColor = "#475569"; });
-dropZone.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dropZone.style.borderColor = "#475569";
-  handleFiles(e.dataTransfer.files);
-});
-fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
+dropZone.addEventListener("drop", (e) => { e.preventDefault(); dropZone.style.borderColor = "#475569"; handleFiles(e.dataTransfer.files); });
+fileInput.addEventListener("change", (e) => { handleFiles(e.target.files); fileInput.value = ""; });
+window.addEventListener("beforeunload", (e) => { if (isProcessing) { e.preventDefault(); e.returnValue = ""; } });
+document.addEventListener("visibilitychange", () => { if (isProcessing && document.visibilityState === "visible") acquireWakeLock(); });
 
 function escapeHtml(str) {
   return str.replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
 }
+function revokeOutputs() { outputUrls.forEach((u) => URL.revokeObjectURL(u)); outputUrls = []; }
 
 function handleFiles(fileList) {
-  selectedFiles = Array.from(fileList);
-  if (selectedFiles.length === 0) {
-    fileListDiv.innerHTML = "선택된 파일이 없습니다.";
-    startBtn.disabled = true;
-    return;
-  }
+  if (isProcessing) { addLog("⚠️ 처리 중에는 파일 목록을 바꿀 수 없습니다."); return; }
+  revokeOutputs();
+  selectedFiles = Array.from(fileList || []);
+  if (selectedFiles.length === 0) { fileListDiv.innerHTML = "선택된 파일이 없습니다."; startBtn.disabled = true; return; }
   startBtn.disabled = false;
   fileListDiv.innerHTML = selectedFiles.map((f, i) => `
     <div class="file-item">
       <span style="word-break:break-all;">🎬 ${escapeHtml(f.name)} (${(f.size / 1048576).toFixed(1)} MB)</span>
-      <span id="fstatus_${i}" style="color:#94a3b8; white-space:nowrap;">대기 중</span>
-    </div>
-  `).join("");
+      <span id="fstatus_${i}" class="fstatus">대기 중</span>
+    </div>`).join("");
 }
 
+// 로그: 줄 단위 노드 추가/삭제만 수행 (전체 텍스트 재작성으로 인한 깜빡임·O(n²) 비용 제거)
 function addLog(msg) {
   const ts = new Date().toTimeString().split(" ")[0];
-  logBox.textContent += `\n[${ts}] ${msg}`;
-  logBox.scrollTop = logBox.scrollHeight;
+  const stick = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 30;
+  const div = document.createElement("div");
+  div.textContent = `[${ts}] ${msg}`;
+  logBox.appendChild(div);
+  while (logBox.childElementCount > LOG_MAX_LINES) logBox.firstElementChild.remove();
+  if (stick) logBox.scrollTop = logBox.scrollHeight;
 }
 
-function setProgress(pct, label) {
-  const p = Math.max(0, Math.min(100, Math.round(pct)));
-  progFill.style.width = p + "%";
-  progTxt.textContent = `${label} (${p}%)`;
+function fmtDur(sec) {
+  if (sec === null || !Number.isFinite(sec)) return "계산 중";
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+  return h ? `${h}시간 ${m}분 ${s}초` : `${m}분 ${s}초`;
 }
-
 function formatSrtTime(seconds) {
-  const safeSec = Math.max(0, seconds);
-  const totalMs = Math.round(safeSec * 1000);
-  const ms = totalMs % 1000;
-  const totalS = Math.floor(totalMs / 1000);
-  const s = totalS % 60;
-  const m = Math.floor(totalS / 60) % 60;
-  const h = Math.floor(totalS / 3600);
+  const totalMs = Math.round(Math.max(0, seconds) * 1000);
+  const ms = totalMs % 1000, totalS = Math.floor(totalMs / 1000);
+  const s = totalS % 60, m = Math.floor(totalS / 60) % 60, h = Math.floor(totalS / 3600);
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
 }
 
+// 파일명 → 문맥 힌트: 사이트 접두어·해상도·코덱·릴리스 태그 제거, 품번(ABC-123)과 일본어 제목은 보존
 function cleanTitleHint(filename) {
-  return filename.replace(/\.[^/.]+$/, "")
-    .replace(/\[[^\]]*\]|\([^\)]*\)|720p|1080p|2160p|x264|x265|HEVC|AAC|WEB-DL|BluRay/gi, " ")
-    .replace(/[_\.]+/g, " ").trim();
+  let s = filename.replace(/\.[^/.]+$/, "");
+  s = s.replace(/^(?:www\.)?[a-z0-9-]+\.(?:com|net|org|tv|cc|me|xyz|top|info)@/i, " ");
+  s = s.replace(/\[[\x20-\x7E]*\]|\([\x20-\x7E]*\)/g, " "); // 영문/숫자 태그만 든 괄호 제거 (일본어 제목 괄호는 유지)
+  s = s.replace(/[【】「」『』]/g, " ");
+  s = s.replace(/\b(?:\d{3,4}p|4k|8k|uhd|fhd|hd|sd|x26[45]|h\.?26[45]|hevc|avc|av1|vp9|aac(?:2\.0)?|e?ac3|dts(?:-?hd)?|truehd|flac|opus|mp3|web-?dl|web-?rip|blu-?ray|bd-?rip|remux|10bit|8bit|hdr10?|\d{2,3}fps|uncensored|uncen|leaked|chs|cht|eng|subbed|sub|raw|1080|720)\b/gi, " ");
+  s = s.replace(/[_.+]+/g, " ").replace(/\s+/g, " ").trim();
+  const code = (s.match(/\b[A-Z]{2,6}-?\d{2,5}\b/i) || [])[0];
+  return { hint: s.slice(0, 160), code: code ? code.toUpperCase() : "" };
 }
 
-// 16kHz 모노 오디오 추출 (WebAudio 고속 디코딩 + HTML5 MediaElement 스트림 캡처 폴백)
-async function extractAudioSafe(file) {
-  const ab = await file.arrayBuffer();
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-  try {
-    const decoded = await audioCtx.decodeAudioData(ab);
-    const mono = new Float32Array(decoded.length);
-    const ch0 = decoded.getChannelData(0);
-    if (decoded.numberOfChannels > 1) {
-      const ch1 = decoded.getChannelData(1);
-      for (let i = 0; i < mono.length; i++) mono[i] = (ch0[i] + ch1[i]) * 0.5;
-    } else {
-      mono.set(ch0);
+async function acquireWakeLock() {
+  try { if ("wakeLock" in navigator && (!wakeLock || wakeLock.released)) wakeLock = await navigator.wakeLock.request("screen"); } catch {}
+}
+async function releaseWakeLock() { try { if (wakeLock && !wakeLock.released) await wakeLock.release(); } catch {} wakeLock = null; }
+
+function setBusy(busy) {
+  isProcessing = busy;
+  startBtn.disabled = busy || selectedFiles.length === 0;
+  modelSelect.disabled = busy; deviceSelect.disabled = busy;
+  dropZone.classList.toggle("busy", busy);
+  if (busy) { acquireWakeLock(); ui.start(); } else { releaseWakeLock(); ui.stop(); }
+}
+
+// ───────────────────────── 진행 상태 UI ─────────────────────────
+// 상태 객체만 갱신하고, 250ms 타이머가 값이 바뀐 요소의 textContent/width만 고침 → 깜빡임 없음
+const ui = (() => {
+  const el = {
+    oFill: $("overall_fill"), oPct: $("overall_pct"), oLabel: $("overall_label"),
+    sFill: $("stage_fill"), sPct: $("stage_pct"), sLabel: $("stage_label"),
+    file: $("st_file"), elapsed: $("st_elapsed"), eta: $("st_eta"), model: $("st_model"), audio: $("st_audio"), api: $("st_api")
+  };
+  const last = new Map();
+  const set = (node, prop, val) => { const k = node.id + prop; if (last.get(k) !== val) { last.set(k, val); if (prop === "w") node.style.width = val; else node.textContent = val; } };
+  const S = {
+    totalFiles: 0, fileIdx: 0, fileName: "-", runStart: 0, fileStart: 0,
+    // 파일 내 단계 가중치(전체 진행률 계산용)
+    stage: "idle", stageLabel: "현재 단계 대기 중", stageFrac: 0, stageFn: null,
+    weights: { audio: 0.05, asr: 0.8, translate: 0.15 },
+    model: "-", audio: "-", apiCalls: 0, filesDone: 0, doneSec: 0
+  };
+  let timer = null;
+  function stageBase(stage) {
+    const w = S.weights;
+    return stage === "audio" ? 0 : stage === "asr" ? w.audio : stage === "translate" ? w.audio + w.asr : stage === "done" ? 1 : 0;
+  }
+  function fileFrac() {
+    const f = S.stageFn ? clamp(S.stageFn(), 0, 1) : S.stageFrac;
+    return clamp(stageBase(S.stage) + (S.weights[S.stage] || 0) * f, 0, 1);
+  }
+  function render() {
+    const now = Date.now();
+    const sf = S.stageFn ? clamp(S.stageFn(), 0, 1) : S.stageFrac;
+    const ff = fileFrac();
+    const overall = S.totalFiles ? clamp((S.fileIdx + ff) / S.totalFiles, 0, 1) : 0;
+    set(el.oFill, "w", (overall * 100).toFixed(1) + "%");
+    set(el.oPct, "t", Math.floor(overall * 100) + "%");
+    set(el.oLabel, "t", S.totalFiles ? `전체 진행률 (파일 ${Math.min(S.fileIdx + 1, S.totalFiles)}/${S.totalFiles})` : "전체 진행률");
+    set(el.sFill, "w", (sf * 100).toFixed(1) + "%");
+    set(el.sPct, "t", Math.floor(sf * 100) + "%");
+    set(el.sLabel, "t", S.stageLabel);
+    set(el.file, "t", S.fileName);
+    if (S.runStart) {
+      const fileEl = (now - S.fileStart) / 1000, runEl = (now - S.runStart) / 1000;
+      set(el.elapsed, "t", `${fmtDur(fileEl)} / 전체 ${fmtDur(runEl)}`);
+      // 음성 인식이 실제로 진행된 뒤에만 추정 (모델 로드·오디오 준비 시간으로 튀는 값 방지)
+      const reliable = (S.stage === "asr" && sf > 0.03) || S.stage === "translate" || S.stage === "done";
+      const fEta = reliable && ff > 0 ? fileEl / ff * (1 - ff) : null;
+      const remainingFiles = Math.max(0, S.totalFiles - S.fileIdx - 1);
+      const perFile = S.filesDone ? S.doneSec / S.filesDone : (fEta !== null ? fileEl + fEta : null);
+      const oEta = fEta !== null && perFile !== null ? fEta + remainingFiles * perFile : null;
+      set(el.eta, "t", `${fmtDur(fEta)} / ${fmtDur(oEta)}`);
     }
-    const duration = decoded.duration;
-    await audioCtx.close();
-    return { pcm: mono, duration };
-  } catch (err) {
-    await audioCtx.close();
-    throw new Error(`브라우저 오디오 디코딩 실패 (${err.message}). MP4/WebM 표준 오디오 코덱(AAC/MP3/Opus) 영상을 권장합니다.`);
+    set(el.model, "t", S.model);
+    set(el.audio, "t", S.audio);
+    set(el.api, "t", `${S.apiCalls}회`);
+  }
+  return {
+    S, render,
+    start() { if (!timer) timer = setInterval(render, 250); render(); },
+    stop() { if (timer) { clearInterval(timer); timer = null; } render(); },
+    stageSet(stage, label, frac = 0, fn = null) { S.stage = stage; S.stageLabel = label; S.stageFrac = frac; S.stageFn = fn; },
+    label(text) { S.stageLabel = text; },
+    frac(f, fn = null) { S.stageFrac = f; S.stageFn = fn; }
+  };
+})();
+
+// ───────────────────────── Worker 공용 RPC ─────────────────────────
+function makeRpc(worker, onEvent) {
+  let seq = 0;
+  const pending = new Map();
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.id !== undefined && pending.has(m.id)) {
+      const p = pending.get(m.id);
+      pending.delete(m.id);
+      if (m.type === "error") p.reject(new Error(m.message)); else p.resolve(m);
+    } else onEvent && onEvent(m);
+  };
+  worker.onerror = (e) => {
+    const err = new Error(e.message || "Worker 오류");
+    for (const p of pending.values()) p.reject(err);
+    pending.clear();
+  };
+  return (msg, transfer) => new Promise((resolve, reject) => {
+    const id = ++seq;
+    pending.set(id, { resolve, reject });
+    worker.postMessage({ ...msg, id }, transfer || []);
+  });
+}
+function workerFromScript(id, type) {
+  const url = URL.createObjectURL(new Blob([$(id).textContent], { type: "text/javascript" }));
+  const w = new Worker(url, type === "module" ? { type: "module" } : undefined);
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return w;
+}
+
+// ───────────────────────── 음성 인식 엔진 ─────────────────────────
+let asrWorker = null, asrCall = null, asrLoadedKey = "", asrInfo = null, asrWarmupHook = null;
+const WARMUP_TIMEOUT_MS = 120000;
+
+function asrEvent(m) {
+  if (m.type === "warmup") {
+    ui.label(`모델 워밍업 중 (${m.device.toUpperCase()} 셰이더/커널 준비)`);
+    if (asrWarmupHook) asrWarmupHook(m.device);
+  } else if (m.type === "load_progress") {
+    ui.label(`모델 다운로드 ${Math.round(m.frac * 100)}% (총 ${m.mb}MB, 다음부터 캐시)`);
+    ui.frac(m.frac);
+  } else if (m.type === "status") addLog(`  · ${m.text}`);
+}
+
+function killAsrWorker() {
+  if (asrWorker) asrWorker.terminate();
+  asrWorker = null; asrCall = null; asrLoadedKey = ""; asrInfo = null;
+}
+// GPU 드라이버가 워밍업에서 응답 없이 멈추는 경우(일부 모바일/임베디드 GPU) Worker째 종료하고 WASM으로 재시도
+async function loadAsrOnce(model, device) {
+  if (!asrWorker) {
+    asrWorker = workerFromScript("asr_worker_src", "module");
+    asrCall = makeRpc(asrWorker, asrEvent);
+  }
+  let timer = null;
+  const watchdog = new Promise((_, reject) => {
+    asrWarmupHook = (dev) => {
+      clearTimeout(timer);
+      if (dev !== "webgpu") return; // WASM은 느린 기기에서도 결국 끝나므로 감시하지 않음
+      timer = setTimeout(() => reject(new Error(`${dev.toUpperCase()} 워밍업이 ${WARMUP_TIMEOUT_MS / 1000}초 내에 끝나지 않음`)), WARMUP_TIMEOUT_MS);
+    };
+  });
+  try { return await Promise.race([asrCall({ type: "load", model, device }), watchdog]); }
+  finally { clearTimeout(timer); asrWarmupHook = null; }
+}
+
+async function ensureAsr(model, device) {
+  const key = model + "|" + device;
+  if (asrCall && asrLoadedKey === key) return asrInfo;
+  addLog(`⏳ Whisper 모델 준비: ${model.split("/").pop()} (요청 장치: ${device})`);
+  ui.stageSet("load", "Whisper 모델 준비 중", 0);
+  let r;
+  try {
+    r = await loadAsrOnce(model, device);
+  } catch (e) {
+    killAsrWorker();
+    if (device !== "auto" || /large/.test(model)) throw e; // 강제 지정은 존중
+    addLog(`  ⚠️ ${errMsg(e)} → WASM(CPU)으로 다시 로드합니다`);
+    r = await loadAsrOnce(model, "wasm");
+  }
+  asrLoadedKey = key;
+  asrInfo = r;
+  ui.S.model = `${model.split("/").pop().replace("whisper-", "")} · ${r.device.toUpperCase()} (${r.dtype.replace(/[{}"]/g, "").replace(/_model(_merged)?/g, "")})`;
+  addLog(`✅ 음성 인식 엔진 준비 완료 → ${ui.S.model}${r.device === "wasm" && !self.crossOriginIsolated ? " · GitHub Pages 제약으로 단일 스레드" : ""}`);
+  return r;
+}
+async function transcribeChunk(pcm) {
+  const r = await asrCall({ type: "transcribe", pcm }, [pcm.buffer]);
+  return r.chunks;
+}
+
+// ───────────────────────── 오디오 소스 ─────────────────────────
+// 모든 방식이 같은 인터페이스: { duration, method, read(startSec, endSec) → Float32Array, close() }
+// FFmpeg 방식은 구간마다 필요한 부분만 디코딩하므로 메모리 사용량이 영상 길이와 무관(약 20MB/5분 구간).
+
+function decodeAudio(ctx, ab) {
+  return new Promise((resolve, reject) => {
+    try {
+      const p = ctx.decodeAudioData(ab, resolve, (e) => reject(e || new Error("decodeAudioData 실패")));
+      if (p && typeof p.then === "function") p.then(resolve, reject);
+    } catch (e) { reject(e); }
+  });
+}
+function downmixToMono(buf) {
+  const n = buf.numberOfChannels, len = buf.length;
+  if (n === 1) return buf.getChannelData(0);
+  const out = new Float32Array(len), ch = (i) => buf.getChannelData(i);
+  if (n === 2) { const L = ch(0), R = ch(1); for (let i = 0; i < len; i++) out[i] = 0.5 * (L[i] + R[i]); }
+  else if (n === 6) { const L = ch(0), R = ch(1), C = ch(2), SL = ch(4), SR_ = ch(5); for (let i = 0; i < len; i++) out[i] = 0.7071 * (L[i] + R[i]) + C[i] + 0.5 * (SL[i] + SR_[i]); }
+  else { for (let c = 0; c < n; c++) { const d = ch(c); for (let i = 0; i < len; i++) out[i] += d[i] / n; } }
+  return out;
+}
+function resample(input, srIn, srOut) {
+  if (srIn === srOut) return input;
+  const ratio = srIn / srOut, outLen = Math.floor(input.length / ratio), out = new Float32Array(outLen);
+  if (ratio > 1) {
+    for (let i = 0; i < outLen; i++) {
+      const s = Math.floor(i * ratio), e = Math.min(input.length, Math.floor((i + 1) * ratio));
+      let sum = 0; for (let j = s; j < e; j++) sum += input[j];
+      out[i] = e > s ? sum / (e - s) : 0;
+    }
+  } else {
+    for (let i = 0; i < outLen; i++) { const x = i * ratio, j = Math.floor(x), f = x - j; out[i] = (input[j] || 0) * (1 - f) + (input[j + 1] || 0) * f; }
+  }
+  return out;
+}
+function memorySource(pcm, method) {
+  return {
+    duration: pcm.length / SR, method,
+    async read(a, b) { return pcm.slice(Math.floor(a * SR), Math.min(pcm.length, Math.floor(b * SR))); }, // slice: Worker로 transfer해도 원본 유지
+    close() { pcm = null; }
+  };
+}
+
+async function probeMediaDuration(file) {
+  const url = URL.createObjectURL(file);
+  const v = document.createElement("video");
+  v.preload = "metadata";
+  try {
+    return await new Promise((res) => {
+      const t = setTimeout(() => res(null), 8000);
+      v.onloadedmetadata = () => { clearTimeout(t); res(Number.isFinite(v.duration) ? v.duration : null); };
+      v.onerror = () => { clearTimeout(t); res(null); };
+      v.src = url;
+    });
+  } finally { v.removeAttribute("src"); v.load(); URL.revokeObjectURL(url); }
+}
+
+async function webAudioSource(file) {
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!OAC) throw new Error("OfflineAudioContext 미지원");
+  let ctx; try { ctx = new OAC(1, 1, SR); } catch { ctx = new OAC(1, 1, 44100); }
+  let buf = await decodeAudio(ctx, await file.arrayBuffer());
+  const rate = buf.sampleRate;
+  let mono = downmixToMono(buf); buf = null;
+  if (rate !== SR) mono = resample(mono, rate, SR);
+  return memorySource(mono, "Web Audio (메모리 디코딩)");
+}
+
+let ffWorker = null, ffCall = null;
+async function ensureFFmpeg() {
+  if (ffCall) return;
+  let lastErr;
+  for (const base of FF_CORE_BASES) {
+    const w = workerFromScript("ff_worker_src", "classic");
+    const call = makeRpc(w);
+    try {
+      await call({ type: "init", coreURL: `${base}/ffmpeg-core.js`, wasmURL: `${base}/ffmpeg-core.wasm` });
+      ffWorker = w; ffCall = call;
+      return;
+    } catch (e) { lastErr = e; w.terminate(); }
+  }
+  throw new Error(`FFmpeg.wasm 로드 실패 (${errMsg(lastErr)})`);
+}
+function parseProbe(log) {
+  const dm = log.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  const duration = dm ? (+dm[1]) * 3600 + (+dm[2]) * 60 + parseFloat(dm[3]) : null;
+  const audio = [];
+  for (const line of log.split("\n")) {
+    const am = line.match(/Stream #\d+:\d+(?:\[[^\]]*\])?(?:\(([a-z]{2,3})\))?.*?: Audio: (.*)/);
+    if (am) audio.push({ lang: am[1] || "", desc: am[2].trim() });
+  }
+  return { duration, audio };
+}
+async function ffmpegSource(file) {
+  await ensureFFmpeg();
+  const ext = (file.name.match(/\.[^.]+$/) || [".bin"])[0].toLowerCase().replace(/[^.a-z0-9]/g, "");
+  // 파일명에 ':'·'%' 등이 있으면 FFmpeg가 프로토콜/패턴으로 오해 → 같은 Blob을 안전한 이름으로 감쌈(데이터 복사 없음)
+  const safe = new File([file], "input" + ext, { type: file.type });
+  const probe = parseProbe((await ffCall({ type: "open", file: safe })).log);
+  if (!probe.audio.length) throw new Error("오디오 트랙을 찾지 못했습니다");
+  let ai = probe.audio.findIndex((a) => /^(jpn|ja)$/.test(a.lang));
+  if (ai < 0) ai = 0;
+  const map = `0:a:${ai}`;
+  let duration = probe.duration;
+  if (!duration) {
+    addLog("  · 컨테이너에 길이 정보가 없어 전체 스캔으로 측정합니다...");
+    const log = (await ffCall({ type: "scan_duration", name: safe.name, map })).log;
+    const tm = [...log.matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)].pop();
+    duration = tm ? (+tm[1]) * 3600 + (+tm[2]) * 60 + parseFloat(tm[3]) : null;
+    if (!duration) throw new Error("재생 길이를 알 수 없습니다");
+  }
+  addLog(`  · 오디오 트랙 ${ai + 1}/${probe.audio.length} 사용${probe.audio[ai].lang ? ` (${probe.audio[ai].lang})` : ""}: ${probe.audio[ai].desc.slice(0, 60)}`);
+  return {
+    duration, method: "FFmpeg.wasm (구간 스트리밍)",
+    async read(a, b) {
+      const r = await ffCall({ type: "extract", name: safe.name, map, start: a, dur: b - a, nearEnd: b >= duration - 1 });
+      return new Float32Array(r.buf);
+    },
+    async close() { try { await ffCall({ type: "close" }); } catch {} }
+  };
+}
+
+function waitMediaEvent(media, okEvent, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { cleanup(); reject(new Error(`${okEvent} 대기 시간 초과`)); }, timeoutMs);
+    const ok = () => { cleanup(); resolve(); };
+    const bad = () => { cleanup(); reject(new Error(media.error ? `미디어 오류 코드 ${media.error.code}` : "미디어 로드 실패")); };
+    const cleanup = () => { clearTimeout(t); media.removeEventListener(okEvent, ok); media.removeEventListener("error", bad); };
+    media.addEventListener(okEvent, ok); media.addEventListener("error", bad);
+  });
+}
+// 최후 폴백: 1배속 재생 캡처 (영상 길이만큼 소요)
+async function realtimeSource(file) {
+  const url = URL.createObjectURL(file);
+  const media = document.createElement("video");
+  media.preload = "auto"; media.playsInline = true; media.src = url;
+  let ctx = null, src = null, proc = null, timer = null;
+  let out = null, pos = 0;
+  try {
+    await waitMediaEvent(media, "loadedmetadata", 30000);
+    const duration = media.duration;
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error("재생 길이를 알 수 없음");
+    if (duration > REALTIME_MAX_SEC) throw new Error(`실시간 캡처는 ${REALTIME_MAX_SEC / 3600}시간 이하만 지원`);
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try { ctx = new AC({ sampleRate: SR }); } catch { ctx = new AC(); }
+    // 조각 배열 + 최종 합치기(2배 메모리) 대신 처음부터 한 버퍼에 직접 기록
+    out = new Float32Array(Math.ceil((duration + 5) * ctx.sampleRate));
+    src = ctx.createMediaElementSource(media);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    proc.channelCount = 1; proc.channelCountMode = "explicit"; proc.channelInterpretation = "speakers";
+    let stalled = false;
+    media.addEventListener("waiting", () => { stalled = true; });
+    media.addEventListener("playing", () => { stalled = false; });
+    proc.onaudioprocess = (e) => {
+      if (media.paused || media.ended || stalled) return;
+      const d = e.inputBuffer.getChannelData(0);
+      const n = Math.min(d.length, out.length - pos);
+      if (n > 0) { out.set(n === d.length ? d : d.subarray(0, n), pos); pos += n; }
+    };
+    src.connect(proc); proc.connect(ctx.destination);
+    await ctx.resume();
+    try { await media.play(); } catch (e) { throw new Error(`자동 재생이 차단됨 (${e.name}). 페이지를 한 번 터치한 뒤 다시 시작하세요.`); }
+    ui.frac(0, () => media.currentTime / duration);
+    await new Promise((resolve, reject) => {
+      let lastT = -1, stuckSince = Date.now();
+      timer = setInterval(() => {
+        const t = media.currentTime;
+        if (t > lastT + 0.01) { lastT = t; stuckSince = Date.now(); }
+        else if (!media.paused && Date.now() - stuckSince > 30000) reject(new Error("재생이 30초 이상 멈춤"));
+      }, 1000);
+      media.addEventListener("ended", resolve, { once: true });
+      media.addEventListener("error", () => reject(new Error("재생 중 미디어 오류")), { once: true });
+    });
+    const rate = ctx.sampleRate;
+    let pcm = out.subarray(0, pos);
+    out = null;
+    if (rate !== SR) pcm = resample(pcm, rate, SR);
+    return memorySource(pcm, "실시간 재생 캡처 (1배속)");
+  } finally {
+    if (timer) clearInterval(timer);
+    try { if (proc) { proc.onaudioprocess = null; proc.disconnect(); } } catch {}
+    try { if (src) src.disconnect(); } catch {}
+    try { media.pause(); media.removeAttribute("src"); media.load(); } catch {}
+    URL.revokeObjectURL(url);
+    if (ctx) { try { await ctx.close(); } catch {} }
   }
 }
 
-// Gemini API 호출 (HTTP 429/503 발생 시 자동 재시도 포함)
-async function callGeminiBatchWithRetry(apiKey, srtChunk, titleHint, maxRetries = 3) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-  const prompt =
-    `당신은 전문 영상 자막 번역가입니다. 영상 제목 힌트는 '${titleHint}'입니다.\n` +
-    `규칙:\n` +
-    `1. 제목의 장르·등장인물 관계·말투를 살려 자연스러운 한국어 구어체로 번역하세요.\n` +
-    `2. 각 블록의 번호와 타임코드(00:00:00,000 --> 00:00:00,000)는 절대 수정하거나 생략하지 마세요.\n` +
-    `3. 부가 설명이나 마크다운 코드블록(\`\`\`) 없이 순수 SRT 본문만 출력하세요.\n\n` +
-    srtChunk;
+async function openAudioSource(file) {
+  const order = [];
+  if (FORCE_AUDIO) order.push(FORCE_AUDIO);
+  else if (FFMPEG_ONLY_EXT.test(file.name) || file.size > WEBAUDIO_MAX_BYTES) order.push("ffmpeg", "realtime");
+  else {
+    const d = await probeMediaDuration(file);
+    if (d !== null && d > WEBAUDIO_MAX_SEC) order.push("ffmpeg", "realtime");
+    else order.push("webaudio", "ffmpeg", "realtime");
+  }
+  let lastErr = null;
+  for (const kind of order) {
+    try {
+      ui.label(kind === "realtime" ? "실시간 재생 캡처 중 (영상 길이만큼 소요)" : kind === "ffmpeg" ? "FFmpeg.wasm 준비/분석 중" : "Web Audio 디코딩 중");
+      if (kind === "realtime") addLog("  ⚠️ 실시간 재생 캡처로 전환합니다 (영상 길이만큼 소요, 탭을 닫지 마세요)");
+      const src = kind === "webaudio" ? await webAudioSource(file) : kind === "ffmpeg" ? await ffmpegSource(file) : await realtimeSource(file);
+      return src;
+    } catch (e) {
+      lastErr = e;
+      addLog(`  ⚠️ ${kind} 오디오 추출 실패: ${errMsg(e)}`);
+    }
+  }
+  throw new Error(`모든 오디오 추출 방식 실패 (${errMsg(lastErr)})`);
+}
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.2 }
-      })
+// ───────────────────────── 음성 인식 (경계 정렬) ─────────────────────────
+// 고정 컷은 경계에 걸친 대사를 반토막 냄 → 구간 끝 SAFE_TAIL_SEC 안에서 끝나거나 끝 타임스탬프가 없는(잘린) 대사는 버리고,
+// 다음 구간을 '마지막 확정 대사의 끝'에서 다시 시작해 경계를 대사 사이의 쉼에 맞춤.
+async function transcribeAdaptive(source) {
+  const duration = source.duration;
+  const segments = [];
+  let offset = 0, w = 0, audioDone = 0, wallDone = 0, emptyReads = 0;
+  while (offset < duration - 0.3) {
+    const sliceEnd = Math.min(duration, offset + WINDOW_SEC);
+    const isLast = sliceEnd >= duration - 0.01;
+    const winStart = Date.now();
+    const winLen = sliceEnd - offset;
+    const speed = wallDone > 0 ? audioDone / wallDone : null; // 오디오초/실제초
+    const base = offset;
+    ui.label(`[2/3] 음성 인식 구간 ${w + 1} (${fmtDur(offset)} ~ ${fmtDur(sliceEnd)} / ${fmtDur(duration)})`);
+    // 구간 처리 중에도 측정된 속도로 진행 막대를 부드럽게 보간 (구간 끝의 95%까지만)
+    ui.frac(base / duration, () => {
+      if (!speed) return base / duration;
+      return (base + Math.min(winLen * 0.95, speed * (Date.now() - winStart) / 1000)) / duration;
     });
 
-    if (res.ok) {
-      const data = await res.json();
-      const cand = data.candidates && data.candidates[0];
-      if (!cand || !cand.content || !cand.content.parts || !cand.content.parts[0].text) {
-        throw new Error("Gemini 응답 본문이 비어 있습니다 (안전 필터 또는 토큰 한도 확인).");
-      }
-      let out = cand.content.parts[0].text.trim();
-      return out.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
+    const pcm = await source.read(offset, sliceEnd);
+    const pcmLen = pcm.length;                 // transfer 후 pcm은 detach되어 length=0이 되므로 먼저 보관
+    const raw = pcmLen ? await transcribeChunk(pcm) : [];
+    const realEnd = offset + pcmLen / SR;      // 실제 디코딩된 길이 기준
+
+    const local = [];
+    let prevEnd = 0;
+    for (const c of raw) {
+      const text = (c.text || "").trim();
+      if (!text) continue;
+      const ts = c.timestamp || [];
+      let st = Number.isFinite(ts[0]) ? ts[0] : prevEnd;
+      let en = Number.isFinite(ts[1]) ? ts[1] : null;
+      st = clamp(st, 0, realEnd - offset);
+      if (en !== null) { en = clamp(en, 0, realEnd - offset); if (en <= st) en = null; }
+      local.push({ start: offset + st, end: en === null ? null : offset + en, text });
+      prevEnd = en === null ? st : en;
     }
 
-    if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
-      const waitSec = attempt * 6;
-      addLog(`  ⚠️ API 호출 제한/서버 대기(HTTP ${res.status}) -> ${waitSec}초 후 자동 재시도합니다 (${attempt}/${maxRetries})...`);
-      await new Promise((r) => setTimeout(r, waitSec * 1000));
-      continue;
+    let accepted, nextOffset;
+    if (isLast) {
+      accepted = local; nextOffset = duration;
+    } else if (realEnd < sliceEnd - 1) {
+      // 요청보다 짧게 디코딩됨: 컨테이너 길이 정보가 과대(일부 TS)하거나 중간 불연속.
+      // 바로 EOF로 단정하지 않고, 받은 만큼 확정한 뒤 그 지점부터 계속 읽음. 거의 빈 결과일 때만 종료.
+      accepted = local;
+      if (pcmLen < SR * 0.5) { emptyReads++; nextOffset = emptyReads >= 2 ? duration : sliceEnd; }
+      else { emptyReads = 0; nextOffset = Math.max(realEnd, offset + 1); }
+    } else {
+      emptyReads = 0;
+      const limit = sliceEnd - SAFE_TAIL_SEC;
+      accepted = [];
+      for (const c of local) { if (c.end !== null && c.end <= limit) accepted.push(c); else break; }
+      const lastEnd = accepted.length ? accepted[accepted.length - 1].end : offset;
+      if (lastEnd - offset < MIN_ADVANCE_SEC) {
+        // 확정 대사가 거의 없음(긴 무음/한 덩어리 세그먼트): limit 이전에 시작한 대사는 자르지 않고 통째로 확정하고,
+        // 다음 구간은 그 대사가 끝난 뒤에서 시작 → 강제 절단·재인식 중복 없음
+        accepted = local.filter((c) => c.start < limit).map((c) => ({ ...c, end: c.end === null ? realEnd : c.end }));
+        const tail = accepted.length ? accepted[accepted.length - 1].end : limit;
+        nextOffset = Math.max(limit, tail);
+      } else nextOffset = lastEnd;
     }
-    throw new Error(`Gemini API 오류 (HTTP ${res.status})`);
+    segments.push(...accepted);
+    audioDone += winLen; wallDone += (Date.now() - winStart) / 1000;
+    offset = nextOffset; w++;
+  }
+  ui.frac(1);
+  return segments;
+}
+
+// ───────────────────────── 자막 후처리 ─────────────────────────
+const HALLUCINATION_RES = [
+  /ご視聴ありがとうございました/, /ご清聴ありがとうございました/, /チャンネル登録/, /高評価/,
+  /字幕(作成|制作|提供)/, /^(thank you|thanks) for watching/i, /^[♪～〜\s。、…・]+$/
+];
+const isHallucination = (t) => t.length < 30 && HALLUCINATION_RES.some((re) => re.test(t));
+// 반복 루프 축약: 짧은 반복(아아아…)은 3회까지, 긴 구절 반복(…には、…には、…)은 2회까지
+const cleanText = (t) => String(t).replace(/\s+/g, " ")
+  .replace(/(.{1,8}?)\1{4,}/g, "$1$1$1")
+  .replace(/(.{9,40}?)\1{2,}/g, "$1$1").trim();
+const sanitizeCueText = (t) => String(t).replace(/\r/g, "").split("\n").map((s) => s.trim()).filter(Boolean).join("\n").replace(/-->/g, "→");
+const estimateDur = (text) => clamp(text.length / 7 + 0.6, 1, 6);
+
+function buildCues(segments, duration) {
+  let list = [];
+  for (const s of segments) {
+    const text = cleanText(s.text);
+    if (!text || isHallucination(text)) continue;
+    const start = clamp(s.start, 0, duration);
+    let end = s.end === null ? null : clamp(s.end, 0, duration);
+    if (end !== null && end <= start) end = null;
+    list.push({ start, end, text });
+  }
+  list.sort((a, b) => a.start - b.start);
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i], next = list[i + 1];
+    if (c.end === null) c.end = Math.min(c.start + estimateDur(c.text), next ? Math.max(next.start, c.start + 0.5) : duration);
+  }
+  const split = [];
+  for (const c of list) {
+    const dur = c.end - c.start;
+    const parts = dur > 6 ? (c.text.match(/[^。！？!?]+[。！？!?]*/g) || []).map((s) => s.trim()).filter(Boolean) : [];
+    if (parts.length > 1) {
+      const totalChars = parts.reduce((a, p) => a + p.length, 0);
+      let t = c.start;
+      for (const p of parts) { const d = dur * (p.length / totalChars); split.push({ start: t, end: t + d, text: p }); t += d; }
+    } else split.push(c);
+  }
+  list = split;
+  for (const c of list) { const maxDur = Math.max(MAX_CUE_SEC, estimateDur(c.text) * 1.8); if (c.end - c.start > maxDur) c.end = c.start + maxDur; }
+  const merged = [];
+  for (const c of list) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.text === c.text && c.start - prev.end < 1) prev.end = Math.max(prev.end, c.end);
+    else merged.push(c);
+  }
+  for (let i = 0; i < merged.length; i++) {
+    const c = merged[i], next = merged[i + 1];
+    if (next) {
+      if (c.end > next.start) c.end = next.start;
+      if (c.end - c.start < 0.3) c.end = c.start + 0.3;
+      if (next.start < c.end) next.start = c.end;
+      if (next.end < next.start + 0.3) next.end = next.start + 0.3;
+      if (c.end - c.start < MIN_CUE_SEC) c.end = Math.min(c.start + MIN_CUE_SEC, next.start);
+    } else if (c.end - c.start < MIN_CUE_SEC) c.end = c.start + MIN_CUE_SEC;
+  }
+  // 밀집 구간에서 연쇄적으로 밀린 자막이 영상 끝을 넘지 않게: 넘친 줄은 직전 줄에 합치고 전부 [0, duration]으로 고정
+  const final = [];
+  for (const c of merged) {
+    const prev = final[final.length - 1];
+    if (c.start >= duration - 0.05 && prev) { prev.text += " " + c.text; continue; }
+    c.start = clamp(c.start, 0, duration);
+    c.end = clamp(c.end, c.start + 0.05, Math.max(duration, c.start + 0.05));
+    final.push(c);
+  }
+  return final;
+}
+function cuesToSrt(cues, useKo) {
+  return "﻿" + cues.map((c, i) =>
+    `${i + 1}\n${formatSrtTime(c.start)} --> ${formatSrtTime(c.end)}\n${sanitizeCueText((useKo && c.ko) || c.text)}`
+  ).join("\n\n") + "\n";
+}
+
+// ───────────────────────── Gemini 번역 (무결성 검증) ─────────────────────────
+// 1) 타임코드·번호는 아예 보내지 않음: {id, ja}만 보내고 {id, src, ko}를 JSON 스키마로 강제 → 로컬 원본 타임코드에 id로 재결합
+// 2) src = 원문 앞부분 에코 → 한 줄씩 밀려 쓴 '정렬 어긋남'을 줄 단위로 탐지
+// 3) 누락·밀림·미번역(일본어 그대로) 줄만 골라 재요청, 잘림/차단은 절반 분할, 최종 실패는 원문 유지
+
+class GeminiError extends Error { constructor(message, opts = {}) { super(message); Object.assign(this, opts); } }
+
+const GEMINI_SYSTEM = [
+  "당신은 일본어 영상을 한국어 자막으로 옮기는 전문 번역가입니다.",
+  "입력 JSON: title_hint(파일명에서 뽑은 작품명·품번 힌트), prev_context(직전 묶음의 마지막 몇 줄과 그 번역, 참고용), lines(번역할 줄 배열 {id, ja}).",
+  "출력: lines의 각 항목마다 정확히 하나씩 {id, src, ko} 객체를 같은 순서로 담은 JSON 배열.",
+  "- id: 입력 id를 그대로. 줄을 합치거나 나누거나 건너뛰지 말 것. 내용이 없거나 알아들을 수 없는 줄도 ko에 짧게 옮길 것.",
+  "- src: 해당 id의 ja 원문 앞 6글자를 그대로 복사(검증용).",
+  "- ko: 한국어 번역문만. 설명·괄호 주석·원문 병기 금지.",
+  "번역 원칙:",
+  "1. title_hint로 장르·상황·인물 관계를 추정하고, 화자 관계에 맞게 반말/존댓말을 정해 끝까지 일관되게 유지.",
+  "2. 인명·호칭·고유명사는 한 번 정한 한국어 표기를 끝까지 동일하게 사용. prev_context의 표기를 이어받을 것.",
+  "3. 음성 인식 오류로 보이는 부분은 앞뒤 문맥상 가장 자연스러운 의미로 옮기고, 감탄사·의성어는 한국어 자막 관용 표현으로.",
+  "4. 짧고 읽기 쉬운 자연스러운 구어체 자막 문장으로."
+].join("\n");
+
+const GEMINI_SAFETY = ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]
+  .map((category) => ({ category, threshold: "BLOCK_NONE" }));
+
+const norm = (s) => String(s || "").normalize("NFKC").replace(/[\s\p{P}\p{S}]/gu, "");
+function srcMatches(src, ja) {
+  const b = norm(ja);
+  if (!b) return true;                 // 원문이 기호뿐인 줄은 검증 생략
+  const a = norm(src);
+  if (!a) return false;                // 빈 에코는 실패
+  const k = Math.min(4, a.length, b.length);
+  // 원문 '시작'과 앞 k글자가 일치해야 통과 (모델이 첫 글자 하나를 빠뜨리는 정도만 허용)
+  return b.startsWith(a.slice(0, k)) || (k >= 3 && b.slice(1).startsWith(a.slice(0, k - 1)));
+}
+const looksUntranslated = (ko) => {
+  const kana = (ko.match(/[぀-ヿ]/g) || []).length;
+  const hangul = (ko.match(/[가-힣]/g) || []).length;
+  return kana >= 2 && kana > hangul;
+};
+
+function parseRetryDelaySec(info) {
+  const d = info && Array.isArray(info.details) && info.details.find((x) => x && typeof x.retryDelay === "string");
+  const v = d ? parseFloat(d.retryDelay) : NaN;
+  return Number.isFinite(v) ? v : null;
+}
+async function fetchWithTimeout(url, opts, ms) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ac.signal }); } finally { clearTimeout(t); }
+}
+
+async function geminiRequest(gem, items, ctx) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(gem.model)}:generateContent`;
+  const generationConfig = {
+    temperature: 0.2,
+    responseMimeType: "application/json",
+    responseSchema: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: { id: { type: "INTEGER" }, src: { type: "STRING" }, ko: { type: "STRING" } },
+        required: ["id", "src", "ko"],
+        propertyOrdering: ["id", "src", "ko"]
+      }
+    }
+  };
+  if (/2\.5-flash/.test(gem.model)) generationConfig.thinkingConfig = { thinkingBudget: 0 }; // 생각 토큰 = 출력 한도·비용 낭비
+  const payload = { title_hint: ctx.title, prev_context: ctx.prev, lines: items.map((i) => ({ id: i.id, ja: i.text })) };
+  const body = {
+    systemInstruction: { parts: [{ text: GEMINI_SYSTEM }] },
+    contents: [{ role: "user", parts: [{ text: JSON.stringify(payload) }] }],
+    generationConfig, safetySettings: GEMINI_SAFETY
+  };
+
+  let res;
+  ui.S.apiCalls++;
+  try {
+    res = await fetchWithTimeout(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": gem.apiKey }, // 키를 URL에 넣지 않음
+      body: JSON.stringify(body)
+    }, GEMINI_TIMEOUT_MS);
+  } catch (err) {
+    throw new GeminiError(err.name === "AbortError" ? `응답 시간 초과(${GEMINI_TIMEOUT_MS / 1000}초)` : `네트워크 오류(${err.message})`, { retryable: true });
+  }
+  if (!res.ok) {
+    let info = null;
+    try { info = (await res.json()).error; } catch {}
+    const msg = (info && info.message ? info.message : res.statusText || "").slice(0, 200);
+    let retryDelaySec = parseRetryDelaySec(info);
+    if (retryDelaySec === null) { const ra = parseFloat(res.headers.get("retry-after")); if (Number.isFinite(ra)) retryDelaySec = ra; }
+    throw new GeminiError(`HTTP ${res.status} ${msg}`, {
+      status: res.status, retryDelaySec,
+      retryable: [408, 429, 500, 502, 503, 504].includes(res.status),
+      fatal: [400, 401, 403, 404].includes(res.status)
+    });
+  }
+  let data;
+  try { data = await res.json(); } catch { throw new GeminiError("응답 JSON 파싱 실패", { retryable: true }); }
+  if (data.promptFeedback && data.promptFeedback.blockReason) throw new GeminiError(`입력 차단(${data.promptFeedback.blockReason})`, { blocked: true });
+  const cand = data.candidates && data.candidates[0];
+  if (!cand) throw new GeminiError("응답 후보 없음", { retryable: true });
+  const fr = cand.finishReason;
+  const text = ((cand.content && cand.content.parts) || []).filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("").trim();
+
+  let arr = null;
+  try { arr = JSON.parse(text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); } catch {}
+  if (fr === "MAX_TOKENS") {
+    // 잘린 응답이라도 완결된 객체는 살려서 쓰고 나머지만 재요청
+    const partial = salvagePartialArray(text);
+    throw new GeminiError("출력 토큰 한도 초과(응답 잘림)", { truncated: true, partial });
+  }
+  if (fr && fr !== "STOP") throw new GeminiError(`생성 중단(${fr})`, { blocked: true });
+  if (!Array.isArray(arr)) throw new GeminiError("번역 결과 JSON 형식 오류", { badOutput: true, retryable: true });
+  return arr;
+}
+// 잘린 JSON 배열에서 완결된 최상위 {...} 객체만 문자열/이스케이프를 고려해 잘라내 개별 파싱 (속성 순서 무관)
+function salvagePartialArray(text) {
+  const out = [];
+  let depth = 0, inStr = false, esc = false, start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) { try { const o = JSON.parse(text.slice(start, i + 1)); if (o && typeof o === "object") out.push(o); } catch {} start = -1; }
+    }
+  }
+  return out;
+}
+
+// 응답 배열을 검증해 통과한 줄만 Map(id → ko)으로
+function validate(arr, items) {
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const map = new Map();
+  let misaligned = 0, untranslated = 0;
+  for (const o of arr || []) {
+    const id = Number(o && o.id);
+    const it = byId.get(id);
+    if (!it || map.has(id) || typeof o.ko !== "string" || !o.ko.trim()) continue;
+    if (!srcMatches(o.src, it.text)) { misaligned++; continue; }
+    if (looksUntranslated(o.ko)) { untranslated++; continue; }
+    map.set(id, sanitizeCueText(o.ko));
+  }
+  return { map, misaligned, untranslated };
+}
+
+async function geminiWithRetry(gem, items, ctx) {
+  for (let attempt = 1; ; attempt++) {
+    try { return await geminiRequest(gem, items, ctx); }
+    catch (err) {
+      if (!(err instanceof GeminiError) || !err.retryable || attempt >= GEMINI_MAX_ATTEMPTS) throw err;
+      if (err.status === 429 && err.retryDelaySec != null && err.retryDelaySec > GEMINI_MAX_WAIT_SEC) { err.quota = true; throw err; }
+      const wait = (err.retryDelaySec ?? Math.min(60, 4 * 2 ** (attempt - 1))) + Math.random() * 2;
+      addLog(`  ⚠️ Gemini ${err.message} → ${Math.ceil(wait)}초 후 재시도 (${attempt}/${GEMINI_MAX_ATTEMPTS - 1})`);
+      ui.label(`[3/3] Gemini 재시도 대기 ${Math.ceil(wait)}초`);
+      await sleep(wait * 1000);
+    }
   }
 }
 
-function triggerDownload(filename, content) {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
+async function translateItems(gem, items, ctx, depth = 0) {
+  if (gem.disabled || items.length === 0) return new Map();
+  let arr, carry = new Map();
+  try {
+    arr = await geminiWithRetry(gem, items, ctx);
+  } catch (err) {
+    // 일일 할당량 소진/설정 오류만 전체 중단. 일시적 분당 제한(429)은 이 묶음만 원문 유지하고 다음 묶음은 계속 시도.
+    const quota = err.status === 429 && (err.quota || /quota|per ?day|PerDay|exhausted/i.test(err.message));
+    if (err.fatal || quota) {
+      gem.disabled = true;
+      addLog(`  ❌ Gemini ${err.fatal ? "설정 오류" : "일일 할당량 소진"}(${err.message}) → 이후 번역을 건너뛰고 원문 자막을 저장합니다.`);
+      return new Map();
+    }
+    if (err.status === 429) {
+      addLog(`  ⚠️ 분당 호출 제한이 풀리지 않음 → 이 ${items.length}줄은 원문 유지, 60초 쉬고 다음 묶음 진행`);
+      await sleep(60000);
+      return new Map();
+    }
+    if (err.truncated && err.partial && err.partial.length) {
+      carry = validate(err.partial, items).map;
+      addLog(`  ⚠️ 응답 잘림 → 완결된 ${carry.size}줄은 사용하고 나머지만 재요청`);
+      const rest = items.filter((i) => !carry.has(i.id));
+      if (rest.length && depth < 5) {
+        const more = await translateItems(gem, rest, ctx, depth + 1);
+        for (const [k, v] of more) carry.set(k, v);
+      }
+      return carry;
+    }
+    if ((err.truncated || err.blocked || err.badOutput) && items.length >= 8 && depth < 4) {
+      addLog(`  ⚠️ ${err.message} → ${items.length}줄을 절반으로 나눠 재요청`);
+      const mid = Math.ceil(items.length / 2);
+      const a = await translateItems(gem, items.slice(0, mid), ctx, depth + 1);
+      await sleep(1500);
+      const b = await translateItems(gem, items.slice(mid), ctx, depth + 1);
+      return new Map([...a, ...b]);
+    }
+    addLog(`  ⚠️ 번역 실패(${err.message}) → 해당 ${items.length}줄은 일본어 원문 유지`);
+    return new Map();
+  }
+  const { map, misaligned, untranslated } = validate(arr, items);
+  const missing = items.filter((i) => !map.has(i.id));
+  if (missing.length) {
+    const why = [missing.length - misaligned - untranslated > 0 ? `누락 ${missing.length - misaligned - untranslated}` : "", misaligned ? `줄 밀림 ${misaligned}` : "", untranslated ? `미번역 ${untranslated}` : ""].filter(Boolean).join(", ");
+    if (missing.length < items.length && depth < 4) {
+      addLog(`  ⚠️ 검증 실패 ${missing.length}줄(${why}) → 해당 줄만 재요청`);
+      await sleep(1500);
+      const extra = await translateItems(gem, missing, ctx, depth + 1);
+      for (const [k, v] of extra) map.set(k, v);
+    } else if (missing.length === items.length && items.length >= 8 && depth < 3) {
+      addLog(`  ⚠️ 응답 전체가 검증 실패(${why}) → 절반으로 나눠 재요청`);
+      const mid = Math.ceil(items.length / 2);
+      const a = await translateItems(gem, items.slice(0, mid), ctx, depth + 1);
+      const b = await translateItems(gem, items.slice(mid), ctx, depth + 1);
+      return new Map([...a, ...b]);
+    } else {
+      addLog(`  ⚠️ ${missing.length}줄 번역 검증 실패(${why}) → 해당 줄은 일본어 원문 유지`);
+    }
+  }
+  return map;
+}
+
+async function translateCues(cues, title, gem, batchLines) {
+  const items = cues.map((c, i) => ({ id: i + 1, text: c.text }));
+  // 마지막 묶음이 아주 작게 남지 않도록 균등 분배 (예: 320줄/300 → 160+160)
+  const totalBatches = Math.max(1, Math.ceil(items.length / batchLines));
+  const per = Math.ceil(items.length / totalBatches);
+  addLog(`  - [3/3] 한국어 묶음 번역 시작 (기본 API 호출 ${totalBatches}회 · ${per}줄씩 · ${gem.model})`);
+  const calls0 = ui.S.apiCalls;
+  const titleStr = title.code ? `${title.hint} (품번: ${title.code})` : title.hint;
+  let prev = [];
+  for (let b = 0; b < totalBatches; b++) {
+    if (gem.disabled) break;
+    ui.label(`[3/3] Gemini 번역 묶음 ${b + 1}/${totalBatches}`);
+    ui.frac(b / totalBatches);
+    const batch = items.slice(b * per, (b + 1) * per);
+    const map = await translateItems(gem, batch, { title: titleStr, prev });
+    for (const [id, ko] of map) cues[id - 1].ko = ko;
+    prev = batch.slice(-6).map((i) => ({ ja: i.text, ko: cues[i.id - 1].ko || "" }));
+    if (b < totalBatches - 1) await sleep(2000);
+  }
+  ui.frac(1);
+  const done = cues.filter((c) => c.ko).length;
+  addLog(`  · 번역 검증 통과 ${done}/${cues.length}줄 (이 파일 API 호출 ${ui.S.apiCalls - calls0}회)`);
+  return done;
+}
+
+// ───────────────────────── 다운로드 ─────────────────────────
+function makeSrtUrl(content) {
+  const url = URL.createObjectURL(new Blob([content], { type: "application/x-subrip;charset=utf-8" }));
+  outputUrls.push(url);
+  return url;
+}
+function triggerDownload(url, filename) {
   const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+function addLink(container, url, filename, text, cls) {
+  const a = document.createElement("a");
+  a.className = cls; a.href = url; a.download = filename; a.textContent = text;
+  container.appendChild(a);
+}
+
+// ───────────────────────── 파일 처리 ─────────────────────────
+async function processFile(file, idx, total, opts) {
+  const statusSpan = $(`fstatus_${idx}`);
+  const setStatus = (t, color) => { if (statusSpan) { statusSpan.textContent = t; if (color) statusSpan.style.color = color; } };
+  const label = `[${idx + 1}/${total}]`;
+  const baseName = file.name.replace(/\.[^/.]+$/, "");
+  const title = cleanTitleHint(file.name);
+  ui.S.fileIdx = idx; ui.S.fileName = file.name; ui.S.fileStart = Date.now(); ui.S.audio = "-";
+  ui.S.weights = opts.gemini && !opts.gemini.disabled ? { audio: 0.05, asr: 0.8, translate: 0.15 } : { audio: 0.05, asr: 0.95, translate: 0 };
+
+  setStatus("오디오 준비 중...", "#fbbf24");
+  addLog(`▶ ${label} 시작: ${file.name} (${(file.size / 1048576).toFixed(0)}MB, 문맥 힌트: '${title.hint}'${title.code ? `, 품번 ${title.code}` : ""})`);
+  ui.stageSet("audio", "[1/3] 오디오 준비 중", 0);
+
+  const source = await openAudioSource(file);
+  ui.S.audio = source.method;
+  addLog(`  - [1/3] 오디오 준비 완료: ${source.method} · 길이 ${fmtDur(source.duration)}`);
+
+  let segments;
+  try {
+    setStatus("음성 인식 중...");
+    ui.stageSet("asr", "[2/3] 음성 인식 시작", 0);
+    addLog(`  - [2/3] 일본어 음성 인식 (${WINDOW_SEC}초 구간 · 경계 동적 정렬)`);
+    segments = await transcribeAdaptive(source);
+  } finally {
+    await source.close(); // PCM/마운트 해제
+  }
+
+  const cues = buildCues(segments, source.duration);
+  addLog(`  - [2/3] 타임코드 생성 완료 (자막 ${cues.length}줄, 원시 세그먼트 ${segments.length}개)`);
+  if (!cues.length) { setStatus("대사 없음", "#f87171"); addLog("  ⚠️ 인식된 대사가 없어 SRT를 만들지 않았습니다."); return; }
+
+  const jaSrt = cuesToSrt(cues, false);
+  let finalSrt = jaSrt, translated = 0;
+  if (opts.gemini && !opts.gemini.disabled) {
+    setStatus("Gemini 번역 중...");
+    ui.stageSet("translate", "[3/3] Gemini 번역", 0);
+    translated = await translateCues(cues, title, opts.gemini, opts.batchLines);
+    if (translated > 0) finalSrt = cuesToSrt(cues, true);
+    addLog(translated === cues.length ? `  ✅ 한국어 자막 완료 (${baseName}.srt)` : `  ⚠️ 부분 완료: ${cues.length}줄 중 ${translated}줄 번역, 나머지는 일본어 원문 (${baseName}.srt)`);
+  } else addLog(`  ✅ 일본어 원문 자막 완료 (${baseName}.srt)`);
+
+  const mainUrl = makeSrtUrl(finalSrt);
+  triggerDownload(mainUrl, `${baseName}.srt`);
+  if (statusSpan) {
+    statusSpan.textContent = "";
+    addLink(statusSpan, mainUrl, `${baseName}.srt`, "완료 · .srt 다시 받기", "badge");
+    if (translated > 0) addLink(statusSpan, makeSrtUrl(jaSrt), `${baseName}.ja.srt`, "일본어 원문", "badge sub");
+  }
+  ui.stageSet("done", "완료", 1);
+  ui.S.filesDone++; ui.S.doneSec += (Date.now() - ui.S.fileStart) / 1000;
 }
 
 startBtn.addEventListener("click", async () => {
-  if (selectedFiles.length === 0) return;
-  startBtn.disabled = true;
-  localStorage.setItem("sub_gemini_key", apiKeyInput.value.trim());
-
-  const chosenModel = modelSelect.value;
+  if (isProcessing || selectedFiles.length === 0) return;
+  const files = selectedFiles.slice();
+  saveSettings();
   const apiKey = apiKeyInput.value.trim();
+  const gemini = apiKey ? { apiKey, model: geminiModelInput.value.trim() || DEFAULT_GEMINI_MODEL, disabled: false } : null;
   const batchLines = parseInt(batchSelect.value, 10) || 300;
-  const tStartAll = Date.now();
-
+  Object.assign(ui.S, { totalFiles: files.length, fileIdx: 0, runStart: Date.now(), fileStart: Date.now(), apiCalls: 0, fileName: "-", filesDone: 0, doneSec: 0 });
+  setBusy(true);
+  let ok = 0, fail = 0;
   try {
-    if (!transcriber || loadedModelName !== chosenModel) {
-      addLog(`⏳ 로컬 Whisper 모델(${chosenModel}) 로드 중... (최초 1회 다운로드 후 캐시됨)`);
-      setProgress(5, "Whisper 모델 준비 중");
-      transcriber = await pipeline("automatic-speech-recognition", chosenModel, {
-        quantized: true,
-        progress_callback: (p) => {
-          if (p.status === "progress" && p.progress) {
-            setProgress(Math.min(15, p.progress * 0.15), `모델 다운로드 ${Math.round(p.progress)}%`);
-          }
-        }
-      });
-      loadedModelName = chosenModel;
-      addLog(`✅ 로컬 음성 인식 엔진 준비 완료!`);
-    }
-
-    for (let idx = 0; idx < selectedFiles.length; idx++) {
-      const file = selectedFiles[idx];
-      const statusSpan = document.getElementById(`fstatus_${idx}`);
-      const baseName = file.name.replace(/\.[^/.]+$/, "");
-      const titleHint = cleanTitleHint(file.name);
-      const tFileStart = Date.now();
-
-      statusSpan.textContent = "오디오 추출 중...";
-      statusSpan.style.color = "#fbbf24";
-      addLog(`▶ [${idx + 1}/${selectedFiles.length}] 시작: ${file.name} (문맥 힌트: '${titleHint}')`);
-      setProgress(15, `[${idx + 1}/${selectedFiles.length}] 오디오 추출 중`);
-
-      let audioData = await extractAudioSafe(file);
-      const duration = audioData.duration;
-      addLog(`  - [1/3] 16kHz 오디오 추출 완료 (총 길이: ${Math.floor(duration / 60)}분 ${Math.floor(duration % 60)}초)`);
-
-      statusSpan.textContent = "음성 인식(싱크) 중...";
-      addLog(`  - [2/3] 온디바이스 일본어 음성 인식 시작 (5초 오버랩 정밀 싱크 적용)...`);
-
-      // 5분(300초) 단위로 나누되 내부에서 30초 청크 + 5초 스트라이드 오버랩으로 경계 대사 손실 방지
-      const macroWindowSec = 300;
-      const totalWindows = Math.ceil(duration / macroWindowSec);
-      let srtBlocks = [];
-      let subIndex = 1;
-
-      for (let w = 0; w < totalWindows; w++) {
-        const offsetSec = w * macroWindowSec;
-        const startSample = offsetSec * 16000;
-        const endSample = Math.min(audioData.pcm.length, (offsetSec + macroWindowSec) * 16000);
-        const slicePcm = audioData.pcm.subarray(startSample, endSample);
-
-        const winPct = Math.round((w / totalWindows) * 100);
-        const elapsedSec = Math.round((Date.now() - tFileStart) / 1000);
-        const etaSec = w > 0 ? Math.round((elapsedSec / w) * (totalWindows - w)) : "...";
-        timeInfo.textContent = `파일 ${idx + 1}/${selectedFiles.length} | 경과: ${Math.floor(elapsedSec/60)}분 ${elapsedSec%60}초 | 남은예상: ${etaSec === "..." ? "계산중" : Math.floor(etaSec/60) + "분 " + (etaSec%60) + "초"}`;
-        setProgress(15 + winPct * 0.65, `[2/3] 음성 인식 구간 ${w + 1}/${totalWindows}`);
-
-        const result = await transcriber(slicePcm, {
-          language: "japanese",
-          task: "transcribe",
-          return_timestamps: true,
-          chunk_length_s: 30,
-          stride_length_s: 5
-        });
-
-        const chunks = result.chunks || [];
-        for (const c of chunks) {
-          const text = (c.text || "").trim();
-          if (!text) continue;
-          const rawStart = c.timestamp[0] ?? 0;
-          const rawEnd = c.timestamp[1] ?? (rawStart + 2.5);
-          const t0 = offsetSec + rawStart;
-          const t1 = offsetSec + Math.max(rawStart + 0.4, rawEnd);
-          srtBlocks.push(`${subIndex}\n${formatSrtTime(t0)} --> ${formatSrtTime(t1)}\n${text}`);
-          subIndex++;
-        }
-        await new Promise((r) => setTimeout(r, 30));
+    await ensureAsr(modelSelect.value, deviceSelect.value);
+    for (let i = 0; i < files.length; i++) {
+      try { await processFile(files[i], i, files.length, { batchLines, gemini }); ok++; }
+      catch (err) {
+        fail++;
+        console.error(err);
+        const s = $(`fstatus_${i}`);
+        if (s) { s.textContent = "실패"; s.style.color = "#f87171"; }
+        addLog(`❌ [${files[i].name}] ${errMsg(err)}`);
       }
-
-      // 메모리 즉시 해제
-      audioData.pcm = null;
-      audioData = null;
-
-      addLog(`  - [2/3] 일본어 타임코드 생성 완료 (총 ${srtBlocks.length}개 대사 블록)`);
-
-      let finalSrt = srtBlocks.join("\n\n") + "\n";
-
-      if (apiKey && srtBlocks.length > 0) {
-        statusSpan.textContent = "Gemini 번역 중...";
-        const totalBatches = Math.ceil(srtBlocks.length / batchLines);
-        addLog(`  - [3/3] 한국어 묶음 번역 시작 (총 API 호출: 단 ${totalBatches}회)`);
-
-        let koBlocks = [];
-        for (let b = 0; b < totalBatches; b++) {
-          const chunkStr = srtBlocks.slice(b * batchLines, (b + 1) * batchLines).join("\n\n");
-          setProgress(80 + ((b + 1) / totalBatches) * 18, `[3/3] Gemini 번역 (${b + 1}/${totalBatches}회)`);
-          const translated = await callGeminiBatchWithRetry(apiKey, chunkStr, titleHint);
-          koBlocks.push(translated);
-          if (b < totalBatches - 1) await new Promise((r) => setTimeout(r, 2000));
-        }
-        finalSrt = koBlocks.join("\n\n") + "\n";
-        addLog(`  ✅ [완료] 한국어 자막 완료! (${baseName}.srt 자동 다운로드)`);
-      } else {
-        addLog(`  ✅ [완료] 일본어 원문 자막 완료! (${baseName}.srt 자동 다운로드)`);
-      }
-
-      triggerDownload(`${baseName}.srt`, finalSrt);
-      statusSpan.innerHTML = `<span class="badge">완료됨 (.srt 저장됨)</span>`;
-      setProgress(100, "완료");
     }
-
-    const totalSec = Math.round((Date.now() - tStartAll) / 1000);
-    timeInfo.textContent = `전체 완료 (총 ${Math.floor(totalSec/60)}분 ${totalSec%60}초 소요)`;
-    addLog(`🎉 모든 동영상 처리가 끝났습니다!`);
+    ui.S.fileIdx = files.length;
+    ui.stageSet("done", fail ? `종료: 성공 ${ok} / 실패 ${fail}` : "모든 파일 완료", 1);
+    addLog(fail ? `🏁 처리 종료: 성공 ${ok}개 / 실패 ${fail}개` : `🎉 모든 동영상 처리가 끝났습니다! (총 ${fmtDur((Date.now() - ui.S.runStart) / 1000)})`);
   } catch (err) {
-    addLog(`❌ 오류 발생: ${err.message}`);
+    console.error(err);
+    addLog(`❌ 오류: ${errMsg(err)}`);
+    ui.label("오류로 중단됨");
   } finally {
-    startBtn.disabled = false;
+    setBusy(false);
   }
 });
 </script>
