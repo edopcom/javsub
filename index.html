@@ -4,6 +4,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>온디바이스 Whisper + Gemini 자막기</title>
+<script>
+// GitHub Pages는 서버 헤더를 못 바꿈 → 같은 폴더의 sw.js(서비스 워커)가 이 페이지 응답에 COOP/COEP를 붙여
+// crossOriginIsolated 상태로 만듦 → SharedArrayBuffer 허용 → 음성 인식 WASM 멀티스레드(태블릿 약 2~3배 빠름).
+// 첫 방문 시 서비스 워커 설치 후 한 번만 자동 새로고침.
+(function () {
+  try {
+    if (window.crossOriginIsolated) { sessionStorage.removeItem("coi_reloaded"); return; }
+    if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
+    var reloadOnce = function () {
+      if (window.__busy || sessionStorage.getItem("coi_reloaded")) return; // 처리 중이거나 이미 시도했으면 새로고침 안 함(무한 루프 방지)
+      sessionStorage.setItem("coi_reloaded", "1");
+      location.reload();
+    };
+    navigator.serviceWorker.register("sw.js").then(function () {
+      if (navigator.serviceWorker.controller) reloadOnce();
+      else navigator.serviceWorker.addEventListener("controllerchange", reloadOnce);
+    }).catch(function () {});
+  } catch (e) {}
+})();
+</script>
 <style>
   :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --accent: #3b82f6; --green: #10b981; --text: #f8fafc; --sub: #94a3b8; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 16px; }
@@ -130,6 +150,10 @@
 import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+// sw.js가 COOP/COEP 헤더를 넣어 crossOriginIsolated가 되면 SharedArrayBuffer로 WASM 멀티스레드 사용 가능.
+// 빅·리틀 코어 모바일 SoC를 고려해 (코어 수 - 2), 최대 4스레드.
+const THREADS = self.crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 2)) : 1;
+env.backends.onnx.wasm.numThreads = THREADS;
 
 let asr = null;
 let loadedKey = "";
@@ -154,7 +178,7 @@ function dtypeFor(model, device, gpu) {
 // 단계마다 phase 메시지를 보내 메인의 무응답 감시 타이머를 갱신하고, 어디서 멈췄는지 로그에 남김.
 async function load(model, device) {
   const key = model + "|" + device;
-  if (asr && loadedKey === key) return { device: asr.__device, dtype: asr.__dtype, cached: true };
+  if (asr && loadedKey === key) return { device: asr.__device, dtype: asr.__dtype, cached: true, threads: asr.__device === "wasm" ? THREADS : 0 };
   if (asr) { try { await asr.dispose(); } catch (e) {} asr = null; loadedKey = ""; }
   const phase = (text) => self.postMessage({ type: "phase", device, text });
 
@@ -188,7 +212,7 @@ async function load(model, device) {
   await p(new Float32Array(16000), { language: "japanese", task: "transcribe", max_new_tokens: 8 });
   p.__device = device; p.__dtype = typeof dtype === "string" ? dtype : JSON.stringify(dtype);
   asr = p; loadedKey = key;
-  return { device, dtype: p.__dtype, cached: false };
+  return { device, dtype: p.__dtype, cached: false, threads: device === "wasm" ? THREADS : 0 };
 }
 
 self.onmessage = async (ev) => {
@@ -200,7 +224,9 @@ self.onmessage = async (ev) => {
     } else if (m.type === "transcribe") {
       const out = await asr(m.pcm, {
         language: "japanese", task: "transcribe",
-        return_timestamps: true, chunk_length_s: 30, stride_length_s: 5
+        // stride 5초면 30초 청크가 20초씩만 전진해 연산이 1.5배. 3초로 줄여 24초 전진(1.25배).
+        // 5분 구간 경계는 별도의 동적 정렬 로직이 처리하므로 청크 간 겹침은 이 정도로 충분.
+        return_timestamps: true, chunk_length_s: 30, stride_length_s: 3
       });
       const chunks = (out && out.chunks ? out.chunks : []).map((c) => ({ text: c.text, timestamp: [c.timestamp[0], c.timestamp[1]] }));
       self.postMessage({ type: "result", id: m.id, chunks });
@@ -466,6 +492,7 @@ async function releaseWakeLock() { try { if (wakeLock && !wakeLock.released) awa
 
 function setBusy(busy) {
   isProcessing = busy;
+  window.__busy = busy;
   startBtn.disabled = busy || selectedFiles.length === 0;
   modelSelect.disabled = busy; deviceSelect.disabled = busy;
   dropZone.classList.toggle("busy", busy);
@@ -644,7 +671,8 @@ async function ensureAsr(model, device) {
   asrLoadedKey = key;
   asrInfo = r;
   ui.S.model = `${model.split("/").pop().replace("whisper-", "")} · ${r.device.toUpperCase()} (${r.dtype.replace(/[{}"]/g, "").replace(/_model(_merged)?/g, "")})`;
-  addLog(`✅ 음성 인식 엔진 준비 완료 → ${ui.S.model}${r.device === "wasm" && !self.crossOriginIsolated ? " · GitHub Pages 제약으로 단일 스레드" : ""}`);
+  if (r.device === "wasm") ui.S.model += ` · ${r.threads}스레드`;
+  addLog(`✅ 음성 인식 엔진 준비 완료 → ${ui.S.model}${r.device === "wasm" && r.threads <= 1 ? " (멀티스레드 비활성: 페이지를 한 번 새로고침하면 켜질 수 있음)" : ""}`);
   return r;
 }
 async function transcribeChunk(pcm) {
