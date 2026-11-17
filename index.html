@@ -137,6 +137,7 @@
     </div>
     <div class="file-list" id="file_list">선택된 파일이 없습니다.</div>
     <button class="btn btn-start" id="btn_start" disabled>선택한 동영상 일괄 자막 생성 시작</button>
+    <button class="btn" id="btn_selftest" type="button" style="width:100%; margin-top:8px; background:#7c3aed;">🧪 자가 진단 (테스트 음성 약 70초로 정확도·속도 측정 · 현재 설정 사용)</button>
   </div>
 
   <div class="card">
@@ -154,6 +155,11 @@
       <div><b>Gemini 호출</b><span id="st_api">0회</span></div>
     </div>
     <div class="log-box" id="log_box"><div>대기 중입니다. 동영상을 선택하고 시작을 누르세요.</div></div>
+    <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+      <button class="btn" id="btn_log_save" type="button" style="background:#475569;">📄 현재 로그 저장 (.txt)</button>
+      <button class="btn" id="btn_log_prev" type="button" style="background:#475569;" disabled>🕘 이전 실행 로그 저장</button>
+    </div>
+    <div style="font-size:0.75rem; color:var(--sub); margin-top:6px;">로그는 이 브라우저에 자동 보관됩니다. 탭이 꺼지거나 새로고침해도 '이전 실행 로그'로 받을 수 있습니다.</div>
   </div>
 </div>
 
@@ -683,17 +689,79 @@ function handleFiles(fileList) {
     </div>`).join("");
 }
 
-// 로그: 줄 단위 노드 추가/삭제만 수행 (전체 텍스트 재작성으로 인한 깜빡임·O(n²) 비용 제거)
-setTimeout(() => { if (crashNotice) addLog(crashNotice); }, 0);
+// 로그: 화면에는 최근 500줄만(줄 단위 노드 추가/삭제로 깜빡임 없음), 전체 기록은 메모리에 보관하고
+// 2초마다 localStorage에 저장 → 탭이 강제 종료되거나 새로고침해도 다음 접속 때 '이전 실행 로그'로 받을 수 있음
+const LOG_CUR_KEY = "sub_log_cur", LOG_PREV_KEY = "sub_log_prev";
+const LOG_KEEP_LINES = 20000, LOG_STORE_LINES = 4000;
+const logAll = [];
+let logDirty = false;
+function flushLog() {
+  if (!logDirty) return;
+  logDirty = false;
+  if (!store.set(LOG_CUR_KEY, logAll.slice(-LOG_STORE_LINES).join("\n"))) {
+    // 저장 공간 부족 → 더 짧게라도 남김
+    store.set(LOG_CUR_KEY, logAll.slice(-800).join("\n"));
+  }
+}
+setInterval(flushLog, 2000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushLog(); });
+window.addEventListener("pagehide", flushLog);
+
+// 지난 접속의 로그를 '이전 실행 로그'로 옮겨 둠
+const prevLog = store.get(LOG_CUR_KEY);
+if (prevLog) { store.set(LOG_PREV_KEY, prevLog); try { localStorage.removeItem(LOG_CUR_KEY); } catch {} }
+
 function addLog(msg) {
-  const ts = new Date().toTimeString().split(" ")[0];
+  const d = new Date();
+  const line = `[${d.toTimeString().split(" ")[0]}] ${msg}`;
+  logAll.push(line);
+  if (logAll.length > LOG_KEEP_LINES) logAll.splice(0, logAll.length - LOG_KEEP_LINES);
+  logDirty = true;
   const stick = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 30;
   const div = document.createElement("div");
-  div.textContent = `[${ts}] ${msg}`;
+  div.textContent = line;
   logBox.appendChild(div);
   while (logBox.childElementCount > LOG_MAX_LINES) logBox.firstElementChild.remove();
   if (stick) logBox.scrollTop = logBox.scrollHeight;
 }
+
+function logStamp() {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+function downloadText(text, filename) {
+  const url = URL.createObjectURL(new Blob(["﻿" + text], { type: "text/plain;charset=utf-8" }));
+  triggerDownload(url, filename);
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+$("btn_log_save").addEventListener("click", () => { flushLog(); downloadText(logAll.join("\n"), `자막기_로그_${logStamp()}.txt`); });
+const prevLogBtn = $("btn_log_prev");
+const prevStored = store.get(LOG_PREV_KEY);
+if (prevStored) {
+  prevLogBtn.disabled = false;
+  prevLogBtn.textContent = `🕘 이전 실행 로그 저장 (${prevStored.split("\n").length}줄)`;
+}
+prevLogBtn.addEventListener("click", () => {
+  const t = store.get(LOG_PREV_KEY);
+  if (t) downloadText(t, `자막기_이전로그_${logStamp()}.txt`);
+});
+
+// 예기치 않은 오류도 로그에 남김 (원인 추적용)
+window.addEventListener("error", (e) => addLog(`❗ 스크립트 오류: ${e.message || e.type}${e.filename ? ` (${e.filename.split("/").pop()}:${e.lineno})` : ""}`));
+window.addEventListener("unhandledrejection", (e) => addLog(`❗ 처리되지 않은 오류: ${errMsg(e.reason)}`));
+
+// 실행 환경을 로그 맨 앞에 남김 (다른 기기 결과와 비교·원인 분석용)
+function logEnv(kind) {
+  const nav = navigator;
+  addLog(`ℹ️ ${kind} · 환경: ${nav.userAgent}`);
+  addLog(`ℹ️ 메모리 ${nav.deviceMemory || "?"}GB · CPU 코어 ${nav.hardwareConcurrency || "?"} · 멀티스레드(격리) ${self.crossOriginIsolated ? "켜짐" : "꺼짐"} · WebGPU ${nav.gpu ? "있음" : "없음"}`);
+  addLog(`ℹ️ 설정: 엔진 ${engineSelect.value === "fast" ? "고속(Moonshine-ja+VAD)" : "정밀(Whisper " + modelSelect.value.split("/").pop() + ", " + deviceSelect.value + ")"} · 감도 ${vadSensSelect.value} · 구간 ${WINDOW_SEC}초 · 번역 ${apiKeyInput.value.trim() ? "Gemini " + (geminiModelInput.value.trim() || DEFAULT_GEMINI_MODEL) + " / " + batchSelect.value + "줄" : "안 함"}`);
+}
+
+setTimeout(() => {
+  if (prevStored) addLog(`ℹ️ 지난 실행 로그 ${prevStored.split("\n").length}줄이 보관되어 있습니다 → '이전 실행 로그 저장' 버튼으로 받을 수 있습니다.`);
+  if (crashNotice) addLog(crashNotice);
+}, 0);
 
 function fmtDur(sec) {
   if (sec === null || !Number.isFinite(sec)) return "계산 중";
@@ -728,6 +796,7 @@ async function releaseWakeLock() { try { if (wakeLock && !wakeLock.released) awa
 function setBusy(busy) {
   isProcessing = busy;
   window.__busy = busy;
+  $("btn_selftest").disabled = busy;
   startBtn.disabled = busy || selectedFiles.length === 0;
   modelSelect.disabled = busy; deviceSelect.disabled = busy; engineSelect.disabled = busy;
   dropZone.classList.toggle("busy", busy);
@@ -1216,9 +1285,9 @@ async function realtimeSource(file) {
   }
 }
 
-async function openAudioSource(file) {
+async function openAudioSource(file, force = FORCE_AUDIO) {
   const order = [];
-  if (FORCE_AUDIO) order.push(FORCE_AUDIO);
+  if (force) order.push(force);
   else if (FFMPEG_ONLY_EXT.test(file.name) || file.size > WEBAUDIO_MAX_BYTES) order.push("ffmpeg", "realtime");
   else {
     const d = await probeMediaDuration(file);
@@ -1662,7 +1731,7 @@ function addLink(container, url, filename, text, cls) {
 
 // ───────────────────────── 파일 처리 ─────────────────────────
 async function processFile(file, idx, total, opts) {
-  const statusSpan = $(`fstatus_${idx}`);
+  const statusSpan = opts.noStatus ? null : $(`fstatus_${idx}`);
   const setStatus = (t, color) => { if (statusSpan) { statusSpan.textContent = t; if (color) statusSpan.style.color = color; } };
   const label = `[${idx + 1}/${total}]`;
   const baseName = file.name.replace(/\.[^/.]+$/, "");
@@ -1674,7 +1743,7 @@ async function processFile(file, idx, total, opts) {
   addLog(`▶ ${label} 시작: ${file.name} (${(file.size / 1048576).toFixed(0)}MB, 문맥 힌트: '${title.hint}'${title.code ? `, 품번 ${title.code}` : ""})`);
   ui.stageSet("audio", "[1/3] 오디오 준비 중", 0);
 
-  const source = await openAudioSource(file);
+  const source = await openAudioSource(file, opts.forceAudio);
   ui.S.audio = source.method;
   addLog(`  - [1/3] 오디오 준비 완료: ${source.method} · 길이 ${fmtDur(source.duration)}`);
 
@@ -1699,7 +1768,8 @@ async function processFile(file, idx, total, opts) {
 
   const cues = buildCues(segments, source.duration, fastMode);
   addLog(`  - [2/3] 타임코드 생성 완료 (자막 ${cues.length}줄, 원시 세그먼트 ${segments.length}개)`);
-  if (!cues.length) { setStatus("대사 없음", "#f87171"); addLog("  ⚠️ 인식된 대사가 없어 SRT를 만들지 않았습니다."); return; }
+  if (!cues.length) { setStatus("대사 없음", "#f87171"); addLog("  ⚠️ 인식된 대사가 없어 SRT를 만들지 않았습니다."); return { cues, duration: source.duration }; }
+  if (opts.noDownload) { ui.stageSet("done", "완료", 1); return { cues, duration: source.duration }; }
 
   const jaSrt = cuesToSrt(cues, false);
   let finalSrt = jaSrt, translated = 0;
@@ -1720,7 +1790,110 @@ async function processFile(file, idx, total, opts) {
   }
   ui.stageSet("done", "완료", 1);
   ui.S.filesDone++; ui.S.doneSec += (Date.now() - ui.S.fileStart) / 1000;
+  addLog(`  · 이 파일 처리 시간 ${fmtDur((Date.now() - ui.S.fileStart) / 1000)} (영상 ${fmtDur(source.duration)} · ${(source.duration / Math.max(1, (Date.now() - ui.S.fileStart) / 1000)).toFixed(2)}배속)`);
+  if (statusSpan) {
+    // 이 파일까지의 로그 스냅샷 (자막과 함께 보관해 두면 나중에 품질·속도 문제 추적 가능)
+    flushLog();
+    const logUrl = makeSrtUrl(logAll.join("\n"));
+    addLink(statusSpan, logUrl, `${baseName}.log.txt`, "로그", "badge sub");
+  }
+  return { cues, duration: source.duration };
 }
+
+// ───────────────────────── 자가 진단 ─────────────────────────
+// 정답을 아는 일본어 낭독(약 7초)을 무음 간격과 함께 8번 이어 붙인 약 70초 음성을,
+// 실제 대용량 파일과 같은 경로(FFmpeg 추출 → 대사 감지/인식 → 자막 후처리)로 처리해 정확도와 속도를 로그로 남김.
+const SELFTEST_URL = "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/japanese-audio.wav";
+const SELFTEST_TEXT = "森永のおいしい牛乳は濃い青色に牛乳瓶をあしらったデザインのパック牛乳である";
+
+function encodeWav16(pcm) {
+  const b = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(b);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + pcm.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, SR, true);
+  v.setUint32(28, SR * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) v.setInt16(44 + i * 2, Math.round(clamp(pcm[i], -1, 1) * 32767), true);
+  return b;
+}
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+async function buildSelfTestFile() {
+  const res = await fetch(SELFTEST_URL);
+  if (!res.ok) throw new Error(`테스트 음성 다운로드 실패 (HTTP ${res.status})`);
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  let ctx; try { ctx = new OAC(1, 1, SR); } catch { ctx = new OAC(1, 1, 44100); }
+  const buf = await decodeAudio(ctx, await res.arrayBuffer());
+  let one = downmixToMono(buf);
+  if (buf.sampleRate !== SR) one = resample(one, buf.sampleRate, SR);
+  let lead = 0; while (lead < one.length && Math.abs(one[lead]) < 0.02) lead++; // 클립 앞 무음 길이
+  const reps = 8, gap = Math.round(1.3 * SR), head = 2 * SR;
+  const pcm = new Float32Array(head + reps * (one.length + gap) + 3 * SR);
+  const starts = [];
+  for (let i = 0; i < reps; i++) {
+    const at = head + i * (one.length + gap);
+    pcm.set(one, at);
+    starts.push((at + lead) / SR);
+  }
+  return { file: new File([encodeWav16(pcm)], "자가진단_테스트음성.wav", { type: "audio/wav" }), starts, duration: pcm.length / SR };
+}
+
+async function runSelfTest() {
+  if (isProcessing) return;
+  saveSettings();
+  Object.assign(ui.S, { totalFiles: 1, fileIdx: 0, runStart: Date.now(), fileStart: Date.now(), apiCalls: 0, fileName: "자가 진단", filesDone: 0, doneSec: 0 });
+  setBusy(true);
+  try {
+    logEnv("자가 진단");
+    addLog("🧪 자가 진단 시작: 정답을 아는 일본어 낭독 8문장(약 70초)을 실제 대용량 파일과 같은 경로(FFmpeg 추출 → 인식)로 처리합니다. 번역은 하지 않습니다.");
+    ui.stageSet("load", "테스트 음성 준비 중", 0);
+    const t = await buildSelfTestFile();
+    if (engineSelect.value === "fast") await ensureAsr(FAST_MODEL, "wasm");
+    else await ensureAsr(modelSelect.value, deviceSelect.value);
+    const t0 = Date.now();
+    const r = await processFile(t.file, 0, 1, { batchLines: 300, gemini: null, forceAudio: "ffmpeg", noDownload: true, noStatus: true });
+    const sec = (Date.now() - t0) / 1000;
+
+    // 채점: 정답 문장 시작 시각 ±1초 안에 시작한 자막을 대응시키고 글자 오류율(CER)·시작 시각 오차 계산
+    const ref = norm(SELFTEST_TEXT);
+    const used = new Set();
+    let found = 0, cerSum = 0, offSum = 0, offMax = 0;
+    t.starts.forEach((s, k) => {
+      let best = -1, bestD = 1e9;
+      r.cues.forEach((c, j) => { const d = Math.abs(c.start - s); if (!used.has(j) && d < bestD) { bestD = d; best = j; } });
+      if (best < 0 || bestD > 1.0) { addLog(`  · 문장 ${k + 1} (${s.toFixed(2)}초): ❌ 자막 없음`); return; }
+      used.add(best);
+      const c = r.cues[best];
+      const cer = levenshtein(norm(c.text), ref) / ref.length;
+      found++; cerSum += cer; offSum += bestD; offMax = Math.max(offMax, bestD);
+      addLog(`  · 문장 ${k + 1}: 시작 오차 ${(c.start - s >= 0 ? "+" : "") + (c.start - s).toFixed(2)}초 · 글자 오류율 ${(cer * 100).toFixed(1)}% · ${c.text}`);
+    });
+    const extra = r.cues.length - used.size;
+    const avgCer = found ? cerSum / found : 1;
+    const speed = t.duration / sec;
+    addLog(`🧪 결과: 문장 ${found}/${t.starts.length}개 인식 · 불필요한 추가 자막 ${extra}개 · 평균 글자 오류율 ${(avgCer * 100).toFixed(1)}% · 시작 오차 평균 ${(found ? offSum / found : 0).toFixed(2)}초/최대 ${offMax.toFixed(2)}초`);
+    addLog(`🧪 속도: 음성 ${fmtDur(t.duration)}를 ${sec.toFixed(1)}초에 처리 (${speed.toFixed(2)}배속, 모델 로드 제외) → 2시간 영상 예상 약 ${fmtDur(7200 / speed)}`);
+    const ok = found >= 7 && avgCer <= 0.15 && offMax <= 0.6 && extra <= 1;
+    addLog(ok ? "✅ 자가 진단 통과: 인식 정확도와 타이밍이 정상 범위입니다." : "⚠️ 자가 진단 기준 미달: 위 문장별 결과를 확인하세요. (기준: 7문장 이상, 평균 오류율 15% 이하, 시작 오차 0.6초 이하)");
+    addLog("ℹ️ 실제 영상 속도는 대사 비율에 따라 달라집니다(이 테스트는 대사 비율 약 85%로 느린 편).");
+    ui.stageSet("done", ok ? "자가 진단 통과" : "자가 진단 기준 미달", 1);
+  } catch (e) {
+    console.error(e);
+    addLog(`❌ 자가 진단 실패: ${errMsg(e)}`);
+    ui.label("자가 진단 실패");
+  } finally {
+    setBusy(false);
+    flushLog();
+  }
+}
+$("btn_selftest").addEventListener("click", runSelfTest);
 
 startBtn.addEventListener("click", async () => {
   if (isProcessing || selectedFiles.length === 0) return;
@@ -1733,6 +1906,7 @@ startBtn.addEventListener("click", async () => {
   setBusy(true);
   let ok = 0, fail = 0;
   try {
+    logEnv(`자막 생성 시작 (파일 ${files.length}개)`);
     const useFast = engineSelect.value === "fast", wModel = modelSelect.value, wDevice = deviceSelect.value;
     // 이미 로드돼 있으면 즉시 반환. 앞 파일에서 Worker가 죽어 폐기됐으면 여기서 다시 로드됨.
     const ensureEngine = () => useFast ? ensureAsr(FAST_MODEL, "wasm") : ensureAsr(wModel, wDevice);
@@ -1756,6 +1930,7 @@ startBtn.addEventListener("click", async () => {
     ui.label("오류로 중단됨");
   } finally {
     setBusy(false);
+    flushLog();
   }
 });
 </script>
