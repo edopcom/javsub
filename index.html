@@ -443,6 +443,37 @@ function run(args) {
 
 function unmount() {
   if (mounted) { try { core.FS.unmount("/in"); } catch (e) {} mounted = false; }
+  blockCache.clear();
+}
+
+// WORKERFS 원본은 FFmpeg가 요청하는 작은 조각(약 32KB)마다 File.slice + FileReaderSync를 호출함.
+// Android Chrome에서 파일 선택기로 고른 파일은 읽기 1회당 지연이 커서, 5분 구간(약 60MB) 추출에 수 분이 걸림.
+// → 4MB 블록 단위로 읽어 최근 블록을 캐시(최대 8개, 32MB)해 실제 파일 읽기 횟수를 100배 이상 줄임.
+var BLOCK = 4 * 1024 * 1024, MAX_BLOCKS = 8;
+var blockCache = new Map();
+var blockReader = null;
+function patchWorkerfsRead(WF) {
+  WF.stream_ops.read = function (stream, buffer, offset, length, position) {
+    var size = stream.node.size;
+    if (position >= size) return 0;
+    var end = Math.min(size, position + length), done = 0;
+    if (!blockReader) blockReader = new FileReaderSync();
+    while (position + done < end) {
+      var p = position + done, bi = Math.floor(p / BLOCK);
+      var key = stream.node.name + ":" + bi;
+      var blk = blockCache.get(key);
+      if (blk) { blockCache.delete(key); blockCache.set(key, blk); } // LRU 갱신
+      else {
+        blk = new Uint8Array(blockReader.readAsArrayBuffer(stream.node.contents.slice(bi * BLOCK, Math.min(size, (bi + 1) * BLOCK))));
+        blockCache.set(key, blk);
+        if (blockCache.size > MAX_BLOCKS) blockCache.delete(blockCache.keys().next().value);
+      }
+      var from = p - bi * BLOCK, n = Math.min(end - p, blk.length - from);
+      buffer.set(blk.subarray(from, from + n), offset + done);
+      done += n;
+    }
+    return done;
+  };
 }
 
 self.onmessage = async function (ev) {
@@ -457,6 +488,7 @@ self.onmessage = async function (ev) {
         core.setLogger(function (d) { if (d && d.message) { logs.push(d.message); if (logs.length > 400) logs.shift(); } });
         core.setProgress(function () {});
         try { core.FS.mkdir("/in"); } catch (e) {}
+        patchWorkerfsRead(core.FS.filesystems.WORKERFS);
       }
       self.postMessage({ type: "ok", id: m.id });
     } else if (m.type === "open") {
@@ -913,7 +945,9 @@ async function transcribeFast(source) {
     while (offset < duration - 0.3) {
       const sliceEnd = Math.min(duration, offset + WINDOW_SEC);
       const isLast = sliceEnd >= duration - 0.01;
+      const tr = performance.now();
       const pcm = await source.read(offset, sliceEnd);
+      const readMs = performance.now() - tr;
       const realEnd = offset + pcm.length / SR;
       const short = realEnd < sliceEnd - 1; // 컨테이너 길이 정보보다 실제 오디오가 짧음(일부 TS)
       if (pcm.length < SR * 0.5) {
@@ -926,7 +960,7 @@ async function transcribeFast(source) {
       v.ms = performance.now() - tv;
       let next = v.tailStart !== null && v.tailStart !== undefined ? offset + Math.max(1, v.tailStart - 0.3) : (short ? realEnd : sliceEnd);
       if (isLast) next = duration;
-      return { offset, end: sliceEnd, pcm, segs: v.segs, next, vadMs: v.ms };
+      return { offset, end: sliceEnd, pcm, segs: v.segs, next, vadMs: v.ms, readMs };
     }
     return null;
   }
@@ -949,11 +983,11 @@ async function transcribeFast(source) {
       speechTotal += r.speechSec; sp = r.speechSec;
     }
     const asrMs = performance.now() - ta;
-    const nSegs = cur.segs.length, vadMs = cur.vadMs;
+    const nSegs = cur.segs.length, vadMs = cur.vadMs, readMs = cur.readMs;
     const tw = performance.now();
     cur = await nextP;
     const waitMs = performance.now() - tw; // 인식이 끝난 뒤 다음 구간 준비(추출+대사 감지)를 추가로 기다린 시간
-    addLog(`  · 구간 ${wi + 1} (${fmtDur(base)}~${fmtDur(base + winLen)}): 대사 ${nSegs}개(${sp.toFixed(0)}초) · 대사 감지 ${(vadMs / 1000).toFixed(1)}초 · 인식 ${(asrMs / 1000).toFixed(1)}초 · 다음 구간 대기 ${(waitMs / 1000).toFixed(1)}초`);
+    addLog(`  · 구간 ${wi + 1} (${fmtDur(base)}~${fmtDur(base + winLen)}): 대사 ${nSegs}개(${sp.toFixed(0)}초) · 오디오 추출 ${(readMs / 1000).toFixed(1)}초 · 대사 감지 ${(vadMs / 1000).toFixed(1)}초 · 인식 ${(asrMs / 1000).toFixed(1)}초 · 다음 구간 대기 ${(waitMs / 1000).toFixed(1)}초`);
     w++;
   }
   ui.frac(1);
