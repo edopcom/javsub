@@ -482,27 +482,41 @@ function unmount() {
 var BLOCK = 4 * 1024 * 1024, MAX_BLOCKS = 8;
 var blockCache = new Map();
 var blockReader = null;
+// 블록 캐시가 기기에서 실패하면(예: 일부 Android에서 큰 조각 읽기 오류) 원래의 작은 단위 읽기로 자동 전환
+var useCache = true, readErr = "";
 function patchWorkerfsRead(WF) {
+  var orig = WF.stream_ops.read;
   WF.stream_ops.read = function (stream, buffer, offset, length, position) {
-    var size = stream.node.size;
-    if (position >= size) return 0;
-    var end = Math.min(size, position + length), done = 0;
-    if (!blockReader) blockReader = new FileReaderSync();
-    while (position + done < end) {
-      var p = position + done, bi = Math.floor(p / BLOCK);
-      var key = stream.node.name + ":" + bi;
-      var blk = blockCache.get(key);
-      if (blk) { blockCache.delete(key); blockCache.set(key, blk); } // LRU 갱신
-      else {
-        blk = new Uint8Array(blockReader.readAsArrayBuffer(stream.node.contents.slice(bi * BLOCK, Math.min(size, (bi + 1) * BLOCK))));
-        blockCache.set(key, blk);
-        if (blockCache.size > MAX_BLOCKS) blockCache.delete(blockCache.keys().next().value);
+    if (!useCache) return orig(stream, buffer, offset, length, position);
+    try {
+      var size = stream.node.size;
+      if (position >= size) return 0;
+      var end = Math.min(size, position + length), done = 0;
+      if (!blockReader) blockReader = new FileReaderSync();
+      while (position + done < end) {
+        var p = position + done, bi = Math.floor(p / BLOCK);
+        var key = stream.node.name + ":" + bi;
+        var blk = blockCache.get(key);
+        if (blk) { blockCache.delete(key); blockCache.set(key, blk); } // LRU 갱신
+        else {
+          var want = Math.min(size, (bi + 1) * BLOCK) - bi * BLOCK;
+          blk = new Uint8Array(blockReader.readAsArrayBuffer(stream.node.contents.slice(bi * BLOCK, bi * BLOCK + want)));
+          if (blk.length !== want) throw new Error("블록 읽기 크기 불일치 " + blk.length + "/" + want);
+          blockCache.set(key, blk);
+          if (blockCache.size > MAX_BLOCKS) blockCache.delete(blockCache.keys().next().value);
+        }
+        var from = p - bi * BLOCK, n = Math.min(end - p, blk.length - from);
+        if (n <= 0) throw new Error("블록 범위 오류");
+        buffer.set(blk.subarray(from, from + n), offset + done);
+        done += n;
       }
-      var from = p - bi * BLOCK, n = Math.min(end - p, blk.length - from);
-      buffer.set(blk.subarray(from, from + n), offset + done);
-      done += n;
+      return done;
+    } catch (e) {
+      readErr = (e && e.name ? e.name + ": " : "") + (e && e.message ? e.message : String(e));
+      useCache = false;
+      blockCache.clear();
+      return orig(stream, buffer, offset, length, position);
     }
-    return done;
   };
 }
 
@@ -523,13 +537,15 @@ self.onmessage = async function (ev) {
       self.postMessage({ type: "ok", id: m.id });
     } else if (m.type === "open") {
       unmount();
+      useCache = !m.nocache; readErr = "";
       core.FS.mount(core.FS.filesystems.WORKERFS, { files: [m.file] }, "/in");
       mounted = true;
-      run(["-hide_banner", "-i", "/in/" + m.file.name]);
-      self.postMessage({ type: "probe", id: m.id, log: logs.join("\n") });
+      // FFmpeg.wasm은 -loglevel 설정이 다음 실행에도 남음(추출 때 error로 낮춤) → 분석 때는 반드시 info로 되돌려야 스트림 정보가 출력됨
+      run(["-hide_banner", "-loglevel", "info", "-i", "/in/" + m.file.name]);
+      self.postMessage({ type: "probe", id: m.id, log: logs.join("\n"), readErr: readErr, cache: useCache });
     } else if (m.type === "scan_duration") {
       // 컨테이너에 길이 정보가 없을 때(일부 TS) 오디오만 끝까지 디코딩해 길이 측정
-      run(["-hide_banner", "-i", "/in/" + m.name, "-map", m.map, "-vn", "-f", "null", "-"]);
+      run(["-hide_banner", "-loglevel", "info", "-i", "/in/" + m.name, "-map", m.map, "-vn", "-f", "null", "-"]);
       self.postMessage({ type: "probe", id: m.id, log: logs.join("\n") });
     } else if (m.type === "extract") {
       var args = ["-hide_banner", "-nostdin", "-loglevel", "error"];
@@ -1301,8 +1317,23 @@ async function ffmpegSource(file) {
   const ext = (file.name.match(/\.[^.]+$/) || [".bin"])[0].toLowerCase().replace(/[^.a-z0-9]/g, "");
   // 파일명에 ':'·'%' 등이 있으면 FFmpeg가 프로토콜/패턴으로 오해 → 같은 Blob을 안전한 이름으로 감쌈(데이터 복사 없음)
   const safe = new File([file], "input" + ext, { type: file.type });
-  const probe = parseProbe((await ffCall({ type: "open", file: safe })).log);
-  if (!probe.audio.length) throw new Error("오디오 트랙을 찾지 못했습니다");
+  let pr = await ffCall({ type: "open", file: safe });
+  let probe = parseProbe(pr.log);
+  if (pr.readErr) addLog(`  ⚠️ 4MB 블록 읽기 실패(${pr.readErr}) → 작은 단위 읽기로 전환 (추출이 느려질 수 있음)`);
+  if (!probe.audio.length && pr.cache) {
+    // 블록 캐시가 원인일 수 있으므로 캐시 없이 한 번 더 열어 봄
+    addLog("  ⚠️ 오디오 트랙을 못 찾음 → 블록 캐시 없이 다시 분석합니다");
+    pr = await ffCall({ type: "open", file: safe, nocache: true });
+    probe = parseProbe(pr.log);
+    if (probe.audio.length) addLog("  · 캐시 없이 읽으니 정상 → 이 파일은 작은 단위 읽기로 추출합니다 (느릴 수 있음)");
+  }
+  // 분석 결과 요약을 로그에 남김 (컨테이너·길이·스트림 구성 확인용)
+  const summary = pr.log.split("\n").filter((l) => /^Input #|Duration:|Stream #/.test(l.trim())).map((l) => l.trim()).slice(0, 6);
+  summary.forEach((l) => addLog(`    ${l.slice(0, 160)}`));
+  if (!probe.audio.length) {
+    const tail = pr.log.split("\n").map((l) => l.trim()).filter((l) => l && !/^Aborted|At least one output/.test(l)).slice(-3).join(" | ");
+    throw new Error(`오디오 트랙을 찾지 못했습니다 [FFmpeg: ${tail || "출력 없음"}${pr.readErr ? ` · 읽기 오류: ${pr.readErr}` : ""}]`);
+  }
   let ai = probe.audio.findIndex((a) => /^(jpn|ja)$/.test(a.lang));
   if (ai < 0) ai = 0;
   const map = `0:a:${ai}`;
