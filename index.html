@@ -137,6 +137,12 @@
     </div>
     <div class="file-list" id="file_list">선택된 파일이 없습니다.</div>
     <button class="btn btn-start" id="btn_start" disabled>선택한 동영상 일괄 자막 생성 시작</button>
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:10px; flex-wrap:wrap;">
+      <label style="display:flex; align-items:center; gap:6px; margin:0; color:var(--text); font-size:0.85rem;">
+        <input type="checkbox" id="resume_on" checked> ↩️ 이어서 처리 (중단된 파일은 끝난 구간부터, 완료된 파일은 건너뜀)
+      </label>
+      <button class="btn" id="btn_progress_clear" type="button" style="background:#475569; padding:6px 10px; font-size:0.8rem;">진행 기록 지우기</button>
+    </div>
     <button class="btn" id="btn_selftest" type="button" style="width:100%; margin-top:8px; background:#7c3aed;">🧪 자가 진단 (테스트 음성 약 70초로 정확도·속도 측정 · 현재 설정 사용)</button>
   </div>
 
@@ -719,7 +725,18 @@ function handleFiles(fileList) {
       <span style="word-break:break-all;">🎬 ${escapeHtml(f.name)} (${(f.size / 1048576).toFixed(1)} MB)</span>
       <span id="fstatus_${i}" class="fstatus">대기 중</span>
     </div>`).join("");
+  annotateSelectedFiles();
 }
+const resumeChk = $("resume_on");
+resumeChk.checked = store.get("sub_resume") !== "0";
+resumeChk.addEventListener("change", () => { store.set("sub_resume", resumeChk.checked ? "1" : "0"); if (resumeChk.checked) annotateSelectedFiles(); });
+$("btn_progress_clear").addEventListener("click", async () => {
+  if (isProcessing) { addLog("⚠️ 처리 중에는 지울 수 없습니다."); return; }
+  if (!confirm("저장된 진행 기록과 완성된 자막 사본을 모두 지울까요? (이미 다운로드한 자막 파일은 그대로 남습니다)")) return;
+  await progressDB.clear();
+  addLog("🧹 진행 기록을 모두 지웠습니다. 다음 실행은 처음부터 처리합니다.");
+  selectedFiles.forEach((_, i) => { const s = $(`fstatus_${i}`); if (s) { s.textContent = "대기 중"; s.style.color = ""; } });
+});
 
 // 로그: 화면에는 최근 500줄만(줄 단위 노드 추가/삭제로 깜빡임 없음), 전체 기록은 메모리에 보관하고
 // 2초마다 localStorage에 저장 → 탭이 강제 종료되거나 새로고침해도 다음 접속 때 '이전 실행 로그'로 받을 수 있음
@@ -922,6 +939,7 @@ function setBusy(busy) {
   isProcessing = busy;
   window.__busy = busy;
   $("btn_selftest").disabled = busy;
+  $("btn_progress_clear").disabled = busy;
   startBtn.disabled = busy || selectedFiles.length === 0;
   modelSelect.disabled = busy; deviceSelect.disabled = busy; engineSelect.disabled = busy;
   dropZone.classList.toggle("busy", busy);
@@ -1147,10 +1165,11 @@ function ensureVad() {
 // 고속 모드 파이프라인: 구간 w의 대사 인식(인식 Worker) 중에 구간 w+1의 오디오 추출(FFmpeg Worker)과
 // 대사 감지(VAD Worker)를 동시에 진행 → VAD·추출 시간이 인식 시간 뒤에 숨음.
 // 구간 끝에 걸친 대사는 VAD가 tailStart로 돌려주고, 다음 구간을 그 대사 시작점에서 다시 읽어 잘림·중복을 막음.
-async function transcribeFast(source) {
+// resume: { offset, segments } → 그 지점부터 이어서 인식. onCheckpoint(segments, nextOffset): 구간마다 진행 저장
+async function transcribeFast(source, resume, onCheckpoint) {
   const duration = source.duration;
   const sens = vadSensSelect.value;
-  const segments = [];
+  const segments = resume ? resume.segments.slice() : [];
   let speechTotal = 0, w = 0;
 
   // 구간 하나를 읽고 대사 감지까지 수행 → { offset, end, pcm, segs, next } (더 읽을 게 없으면 null)
@@ -1183,7 +1202,7 @@ async function transcribeFast(source) {
     return null;
   }
 
-  let cur = await prepare(0);
+  let cur = await prepare(resume ? resume.offset : 0);
   let nextP = null;
   try {
   while (cur) {
@@ -1204,6 +1223,7 @@ async function transcribeFast(source) {
     }
     const asrMs = performance.now() - ta;
     const nSegs = cur.segs.length, vadMs = cur.vadMs, readMs = cur.readMs;
+    if (onCheckpoint) onCheckpoint(segments, cur.next); // 이 구간까지 확정 → 중단돼도 다음엔 cur.next부터
     const tw = performance.now();
     cur = await nextP;
     const waitMs = performance.now() - tw; // 인식이 끝난 뒤 다음 구간 준비(추출+대사 감지)를 추가로 기다린 시간
@@ -1452,10 +1472,10 @@ async function openAudioSource(file, force = FORCE_AUDIO) {
 // ───────────────────────── 음성 인식 (경계 정렬) ─────────────────────────
 // 고정 컷은 경계에 걸친 대사를 반토막 냄 → 구간 끝 SAFE_TAIL_SEC 안에서 끝나거나 끝 타임스탬프가 없는(잘린) 대사는 버리고,
 // 다음 구간을 '마지막 확정 대사의 끝'에서 다시 시작해 경계를 대사 사이의 쉼에 맞춤.
-async function transcribeAdaptive(source) {
+async function transcribeAdaptive(source, resume, onCheckpoint) {
   const duration = source.duration;
-  const segments = [];
-  let offset = 0, w = 0, audioDone = 0, wallDone = 0, emptyReads = 0;
+  const segments = resume ? resume.segments.slice() : [];
+  let offset = resume ? resume.offset : 0, w = 0, audioDone = 0, wallDone = 0, emptyReads = 0;
   while (offset < duration - 0.3) {
     const sliceEnd = Math.min(duration, offset + WINDOW_SEC);
     const isLast = sliceEnd >= duration - 0.01;
@@ -1523,6 +1543,7 @@ async function transcribeAdaptive(source) {
     segments.push(...accepted);
     audioDone += winLen; wallDone += (Date.now() - winStart) / 1000;
     offset = nextOffset; w++;
+    if (onCheckpoint) onCheckpoint(segments, offset);
   }
   ui.frac(1);
   return segments;
@@ -1827,7 +1848,8 @@ async function translateItems(gem, items, ctx, depth = 0) {
   return map;
 }
 
-async function translateCues(cues, title, gem, batchLines) {
+// onBatch(): 묶음마다 번역 진행 저장. 이미 번역된 묶음(ko가 다 있는 묶음)은 건너뜀 → 중단 후 재개해도 API 비용 중복 없음
+async function translateCues(cues, title, gem, batchLines, onBatch) {
   const items = cues.map((c, i) => ({ id: i + 1, text: c.text }));
   // 마지막 묶음이 아주 작게 남지 않도록 균등 분배 (예: 320줄/300 → 160+160)
   const totalBatches = Math.max(1, Math.ceil(items.length / batchLines));
@@ -1841,9 +1863,15 @@ async function translateCues(cues, title, gem, batchLines) {
     ui.label(`[3/3] Gemini 번역 묶음 ${b + 1}/${totalBatches}`);
     ui.frac(b / totalBatches);
     const batch = items.slice(b * per, (b + 1) * per);
+    if (batch.every((i) => cues[i.id - 1].ko)) {
+      addLog(`  · 번역 묶음 ${b + 1}/${totalBatches}은 이전 실행에서 완료됨 → 건너뜀`);
+      prev = batch.slice(-6).map((i) => ({ ja: i.text, ko: cues[i.id - 1].ko }));
+      continue;
+    }
     const map = await translateItems(gem, batch, { title: titleStr, prev });
     for (const [id, ko] of map) cues[id - 1].ko = ko;
     prev = batch.slice(-6).map((i) => ({ ja: i.text, ko: cues[i.id - 1].ko || "" }));
+    if (onBatch) await onBatch();
     if (b < totalBatches - 1) await sleep(2000);
   }
   ui.frac(1);
@@ -1869,6 +1897,77 @@ function addLink(container, url, filename, text, cls) {
   container.appendChild(a);
 }
 
+// ───────────────────────── 이어서 처리 (진행 기록) ─────────────────────────
+// 파일별 진행 상황을 IndexedDB에 저장: 인식은 5분 구간마다, 번역은 묶음마다.
+// 브라우저가 종료돼도 같은 파일을 다시 넣으면 끝난 구간·묶음은 건너뛰고, 완성된 파일은 저장된 자막을 바로 내려줌.
+// 상태: asr(인식 중) → asrDone(인식 완료) → translating(번역 중) → done(완성)
+const progressDB = (() => {
+  let dbp = null;
+  const open = () => dbp || (dbp = new Promise((res, rej) => {
+    const r = indexedDB.open("javsub", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("progress");
+    r.onsuccess = () => {
+      const db = r.result;
+      db.onversionchange = () => { db.close(); dbp = null; }; // 다른 탭이 DB를 바꾸려 하면 연결을 양보
+      res(db);
+    };
+    r.onerror = () => { dbp = null; rej(r.error); };
+    r.onblocked = () => { dbp = null; rej(new Error("저장소가 다른 탭에 의해 잠김")); };
+  }));
+  // 저장소가 응답하지 않아도 처리가 멈추지 않도록 3초 제한 (기록 없이 진행)
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("저장소 응답 시간 초과")), ms))]);
+  const tx = (mode, fn) => withTimeout((async () => {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const t = db.transaction("progress", mode), req = fn(t.objectStore("progress"));
+      t.oncomplete = () => res(req ? req.result : undefined);
+      t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+    });
+  })(), 3000).catch((e) => { dbp = null; throw e; });
+  // 저장 공간 부족·사생활 보호 모드 등에서는 조용히 '기록 없음'으로 동작 (처리는 계속)
+  return {
+    get: (k) => tx("readonly", (s) => s.get(k)).catch(() => null),
+    set: (k, v) => tx("readwrite", (s) => s.put(v, k)),
+    del: (k) => tx("readwrite", (s) => s.delete(k)).catch(() => {}),
+    all: () => tx("readonly", (s) => s.getAll()).catch(() => []),
+    clear: () => tx("readwrite", (s) => s.clear()).catch(() => {})
+  };
+})();
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch {} // 브라우저가 기록을 임의로 지우지 않도록 요청
+// Android 파일 선택기는 수정 시각이 매번 달라질 수 있어 이름+크기로 같은 파일을 식별
+const fileKey = (f) => `${f.name}|${f.size}`;
+const engineSig = () => engineSelect.value === "fast" ? `fast:${vadSensSelect.value}` : `whisper:${modelSelect.value.split("/").pop()}`;
+function addSavedLinks(container, rec, baseName) {
+  if (rec.srt) addLink(container, makeSrtUrl(rec.srt), `${baseName}.srt`, "완료됨 · 저장된 .srt 받기", "badge");
+  if (rec.translated && rec.jaSrt) addLink(container, makeSrtUrl(rec.jaSrt), `${baseName}.ja.srt`, "일본어 원문", "badge sub");
+}
+function describeProgress(rec) {
+  if (!rec) return null;
+  const pct = rec.duration ? Math.min(99, Math.floor((rec.nextOffset || 0) / rec.duration * 100)) : 0;
+  if (rec.status === "done") return rec.translated ? "완료됨" : "완료됨(일본어만)";
+  if (rec.status === "translating") return `번역 중 중단 → 이어서 번역`;
+  if (rec.status === "asrDone") return `음성 인식 완료 → 번역부터 이어서`;
+  return `인식 ${pct}%에서 중단 → 이어서 처리`;
+}
+// 파일을 고르면 이전 기록을 표시
+async function annotateSelectedFiles() {
+  if (!resumeChk.checked) return;
+  for (let i = 0; i < selectedFiles.length; i++) {
+    const f = selectedFiles[i];
+    const rec = await progressDB.get(fileKey(f));
+    const s = $(`fstatus_${i}`);
+    if (!rec || !s || isProcessing) continue;
+    s.textContent = `↩️ ${describeProgress(rec)}`;
+    s.style.color = rec.status === "done" ? "#6ee7b7" : "#fbbf24";
+    if (rec.status === "done") addSavedLinks(s, rec, f.name.replace(/\.[^/.]+$/, ""));
+  }
+}
+// 30일 지난 기록은 정리
+progressDB.all().then((list) => {
+  const cutoff = Date.now() - 30 * 86400000;
+  (list || []).forEach((r) => { if (r && r.key && (r.updatedAt || 0) < cutoff) progressDB.del(r.key); });
+});
+
 // ───────────────────────── 파일 처리 ─────────────────────────
 async function processFile(file, idx, total, opts) {
   const statusSpan = opts.noStatus ? null : $(`fstatus_${idx}`);
@@ -1879,47 +1978,88 @@ async function processFile(file, idx, total, opts) {
   ui.S.fileIdx = idx; ui.S.fileName = file.name; ui.S.fileStart = Date.now(); ui.S.audio = "-";
   ui.S.weights = opts.gemini && !opts.gemini.disabled ? { audio: 0.05, asr: 0.8, translate: 0.15 } : { audio: 0.05, asr: 0.95, translate: 0 };
 
-  setStatus("오디오 준비 중...", "#fbbf24");
   addLog(`▶ ${label} 시작: ${file.name} (${(file.size / 1048576).toFixed(0)}MB, 문맥 힌트: '${title.hint}'${title.code ? `, 품번 ${title.code}` : ""})`);
-  ui.stageSet("audio", "[1/3] 오디오 준비 중", 0);
 
-  const source = await openAudioSource(file, opts.forceAudio);
-  ui.S.audio = source.method;
-  addLog(`  - [1/3] 오디오 준비 완료: ${source.method} · 길이 ${fmtDur(source.duration)}`);
+  // ── 이어서 처리: 이 파일의 저장된 진행 기록 확인 ──
+  const pkey = fileKey(file);
+  const sig = engineSig();
+  const wantKo = !!(opts.gemini && !opts.gemini.disabled);
+  let rec = opts.resume ? await progressDB.get(pkey) : null;
+  if (rec && rec.status === "done" && (rec.translated || !wantKo)) {
+    // 이미 완성된 파일: 저장된 자막을 다시 내려주고 건너뜀
+    addLog(`  ⏭️ 이전 실행에서 완료된 파일 → 건너뜀 (저장된 자막을 다시 받을 수 있음 · ${new Date(rec.updatedAt).toLocaleString()})`);
+    if (statusSpan) { statusSpan.textContent = ""; addSavedLinks(statusSpan, rec, baseName); }
+    ui.stageSet("done", "완료(이전 결과)", 1);
+    return { cues: rec.cues || [], duration: rec.duration, skipped: true };
+  }
+  if (rec && rec.sig !== sig && !(rec.status === "done" || rec.status === "translating" || rec.status === "asrDone")) {
+    addLog(`  ℹ️ 이전 진행 기록이 있지만 인식 설정이 달라(${rec.sig} → ${sig}) 처음부터 인식합니다.`);
+    rec = null;
+  }
+  const save = (patch) => progressDB.set(pkey, { ...(rec || {}), key: pkey, name: file.name, size: file.size, sig, updatedAt: Date.now(), ...patch }).then(() => {
+    rec = { ...(rec || {}), ...patch, key: pkey, sig };
+  });
 
-  let segments;
-  const fastMode = !!(asrInfo && asrInfo.fast);
-  try {
-    setStatus("음성 인식 중...");
-    ui.stageSet("asr", "[2/3] 음성 인식 시작", 0);
-    addLog(fastMode
-      ? `  - [2/3] 일본어 음성 인식 (고속 모드: ${WINDOW_SEC}초 구간 · 대사 구간만 인식)`
-      : `  - [2/3] 일본어 음성 인식 (${WINDOW_SEC}초 구간 · 경계 동적 정렬)`);
-    store.set(CRASH_KEY, JSON.stringify({ phase: "asr", model: asrLoadedKey.split("|")[0], device: asrInfo ? asrInfo.device : "", t: Date.now() }));
-    segments = fastMode ? await transcribeFast(source) : await transcribeAdaptive(source);
-  } catch (e) {
-    // 인식 중 실패하면 Worker 상태를 믿을 수 없으므로 폐기 → 다음 파일에서 새로 로드
-    killAsrWorker(); killVadWorker();
-    throw e;
-  } finally {
-    clearCrashMark();
-    await source.close(); // PCM/마운트 해제
+  let segments, duration, fastMode;
+  if (rec && (rec.status === "asrDone" || rec.status === "translating" || rec.status === "done") && rec.segments) {
+    // 음성 인식은 이미 끝남 → 바로 자막 정리/번역 단계로
+    segments = rec.segments; duration = rec.duration; fastMode = !!rec.fast;
+    addLog(`  ⏭️ 음성 인식은 이전 실행에서 완료됨 (대사 ${segments.length}개) → 번역 단계부터 이어서`);
+  } else {
+    setStatus("오디오 준비 중...", "#fbbf24");
+    ui.stageSet("audio", "[1/3] 오디오 준비 중", 0);
+    const source = await openAudioSource(file, opts.forceAudio);
+    ui.S.audio = source.method;
+    duration = source.duration;
+    addLog(`  - [1/3] 오디오 준비 완료: ${source.method} · 길이 ${fmtDur(duration)}`);
+    fastMode = !!(asrInfo && asrInfo.fast);
+    let resume = null;
+    if (rec && rec.status === "asr" && rec.segments && Math.abs((rec.duration || 0) - duration) < 2 && rec.nextOffset > 0 && rec.nextOffset < duration) {
+      resume = { offset: rec.nextOffset, segments: rec.segments };
+      addLog(`  ↩️ 이어서 처리: ${fmtDur(rec.nextOffset)} 지점부터 인식 재개 (이전에 인식한 대사 ${rec.segments.length}개 유지)`);
+    }
+    // 구간마다 진행 저장 (쓰기는 기다리지 않음: 다음 구간 처리와 병행)
+    const checkpoint = opts.noDownload ? null : (segs, next) => {
+      save({ status: "asr", duration, fast: fastMode, nextOffset: next, segments: segs.slice() }).catch(() => {});
+    };
+    try {
+      setStatus(resume ? `이어서 인식 중 (${fmtDur(resume.offset)}~)` : "음성 인식 중...");
+      ui.stageSet("asr", "[2/3] 음성 인식 시작", 0);
+      addLog(fastMode
+        ? `  - [2/3] 일본어 음성 인식 (고속 모드: ${WINDOW_SEC}초 구간 · 대사 구간만 인식)`
+        : `  - [2/3] 일본어 음성 인식 (${WINDOW_SEC}초 구간 · 경계 동적 정렬)`);
+      store.set(CRASH_KEY, JSON.stringify({ phase: "asr", model: asrLoadedKey.split("|")[0], device: asrInfo ? asrInfo.device : "", t: Date.now() }));
+      segments = fastMode ? await transcribeFast(source, resume, checkpoint) : await transcribeAdaptive(source, resume, checkpoint);
+    } catch (e) {
+      // 인식 중 실패하면 Worker 상태를 믿을 수 없으므로 폐기 → 다음 파일에서 새로 로드
+      killAsrWorker(); killVadWorker();
+      throw e;
+    } finally {
+      clearCrashMark();
+      await source.close(); // PCM/마운트 해제
+    }
+    if (!opts.noDownload) await save({ status: "asrDone", duration, fast: fastMode, segments, nextOffset: duration }).catch(() => {});
   }
 
-  const cues = buildCues(segments, source.duration, fastMode);
+  // 번역 중 중단됐던 경우 저장된 자막(일부 번역 포함)을 그대로 이어서 사용
+  const cues = rec && rec.status === "translating" && rec.cues ? rec.cues : buildCues(segments, duration, fastMode);
   addLog(`  - [2/3] 타임코드 생성 완료 (자막 ${cues.length}줄, 원시 세그먼트 ${segments.length}개)`);
-  if (!cues.length) { setStatus("대사 없음", "#f87171"); addLog("  ⚠️ 인식된 대사가 없어 SRT를 만들지 않았습니다."); return { cues, duration: source.duration }; }
-  if (opts.noDownload) { ui.stageSet("done", "완료", 1); return { cues, duration: source.duration }; }
+  if (!cues.length) { setStatus("대사 없음", "#f87171"); addLog("  ⚠️ 인식된 대사가 없어 SRT를 만들지 않았습니다."); return { cues, duration }; }
+  if (opts.noDownload) { ui.stageSet("done", "완료", 1); return { cues, duration }; }
 
   const jaSrt = cuesToSrt(cues, false);
   let finalSrt = jaSrt, translated = 0;
-  if (opts.gemini && !opts.gemini.disabled) {
+  if (wantKo) {
     setStatus("Gemini 번역 중...");
     ui.stageSet("translate", "[3/3] Gemini 번역", 0);
-    translated = await translateCues(cues, title, opts.gemini, opts.batchLines);
+    await save({ status: "translating", cues }).catch(() => {});
+    translated = await translateCues(cues, title, opts.gemini, opts.batchLines, () => save({ status: "translating", cues }).catch(() => {}));
     if (translated > 0) finalSrt = cuesToSrt(cues, true);
     addLog(translated === cues.length ? `  ✅ 한국어 자막 완료 (${baseName}.srt)` : `  ⚠️ 부분 완료: ${cues.length}줄 중 ${translated}줄 번역, 나머지는 일본어 원문 (${baseName}.srt)`);
   } else addLog(`  ✅ 일본어 원문 자막 완료 (${baseName}.srt)`);
+  // 완성본 저장: 다음에 같은 파일을 넣으면 다시 처리하지 않고 이 자막을 내려줌
+  // (번역이 일부만 됐으면 완료로 치지 않아, 다음 실행 때 빠진 줄만 다시 번역)
+  await save({ status: translated && translated < cues.length ? "translating" : "done", cues, srt: finalSrt, jaSrt, translated: translated > 0 && translated === cues.length }).catch(() => {});
 
   const mainUrl = makeSrtUrl(finalSrt);
   triggerDownload(mainUrl, `${baseName}.srt`);
@@ -1930,14 +2070,14 @@ async function processFile(file, idx, total, opts) {
   }
   ui.stageSet("done", "완료", 1);
   ui.S.filesDone++; ui.S.doneSec += (Date.now() - ui.S.fileStart) / 1000;
-  addLog(`  · 이 파일 처리 시간 ${fmtDur((Date.now() - ui.S.fileStart) / 1000)} (영상 ${fmtDur(source.duration)} · ${(source.duration / Math.max(1, (Date.now() - ui.S.fileStart) / 1000)).toFixed(2)}배속)`);
+  addLog(`  · 이 파일 처리 시간 ${fmtDur((Date.now() - ui.S.fileStart) / 1000)} (영상 ${fmtDur(duration)} · ${(duration / Math.max(1, (Date.now() - ui.S.fileStart) / 1000)).toFixed(2)}배속)`);
   if (statusSpan) {
     // 이 파일까지의 로그 스냅샷 (자막과 함께 보관해 두면 나중에 품질·속도 문제 추적 가능)
     flushLog();
     const logUrl = makeSrtUrl(logAll.join("\n"));
     addLink(statusSpan, logUrl, `${baseName}.log.txt`, "로그", "badge sub");
   }
-  return { cues, duration: source.duration };
+  return { cues, duration };
 }
 
 // ───────────────────────── 자가 진단 ─────────────────────────
@@ -2052,7 +2192,11 @@ startBtn.addEventListener("click", async () => {
     const ensureEngine = () => useFast ? ensureAsr(FAST_MODEL, "wasm") : ensureAsr(wModel, wDevice);
     await ensureEngine();
     for (let i = 0; i < files.length; i++) {
-      try { await ensureEngine(); await processFile(files[i], i, files.length, { batchLines, gemini }); ok++; }
+      try {
+        await ensureEngine(); // 앞 파일에서 Worker가 폐기됐으면 다시 로드
+        await processFile(files[i], i, files.length, { batchLines, gemini, resume: resumeChk.checked });
+        ok++;
+      }
       catch (err) {
         fail++;
         console.error(err);
