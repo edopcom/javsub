@@ -1670,6 +1670,39 @@ const isHallucination = (t) => t.length < 30 && HALLUCINATION_RES.some((re) => r
 const cleanText = (t) => String(t).replace(/\s+/g, " ")
   .replace(/(.{1,8}?)\1{4,}/g, "$1$1$1")
   .replace(/(.{9,40}?)\1{2,}/g, "$1$1").trim();
+// 자막 정리 (일본어 인식 결과와 한국어 번역 모두에 적용)
+// 1) 빈 괄호 《》「」() 제거, 문장 전체를 감싼 《…》【…】〈…〉 벗기기
+// 2) 같은 구절이 이어 반복되면 줄이기: 3번 이상이면 1번만, 반복 끝에 잘린 조각("감사합니다. 감사합니다. 감사")이 붙으면 그것도 인식 루프로 보고 1번만
+// 3) 글자·숫자가 하나도 없으면 빈 자막으로 판단
+const KO_META_RE = /번역(된|한)?\s*결과|반드시\s*출력|^\s*(주석|참고|역주|번역)\s*[:：]/;
+const hasContent = (t) => /[\p{L}\p{N}]/u.test(String(t || ""));
+function tidyCue(t) {
+  let s = String(t || "").replace(/\s+/g, " ").trim();
+  s = s.replace(/[《「『【〈(（\[]\s*[》」』】〉)）\]]/g, "").trim();
+  for (let k = 0; k < 2; k++) {
+    const m = s.match(/^[《【〈](.*)[》】〉]$/);
+    if (m && !/[《【〈》】〉]/.test(m[1])) s = m[1].trim();
+  }
+  const units = s.match(/[^。．.!?！？、,，\s]+[。．.!?！？、,，…]*/g);
+  if (units && units.length >= 3) {
+    const key = (u) => u.replace(/[。．.!?！？、,，…\s]/g, "");
+    const out = [];
+    for (let i = 0; i < units.length;) {
+      let j = i + 1;
+      while (j < units.length && key(units[j]) === key(units[i])) j++;
+      const run = j - i, k0 = key(units[i]);
+      if (k0.length < 2) { for (let x = i; x < j; x++) out.push(units[x]); i = j; continue; } // "あ、あ、あ" 같은 말더듬은 그대로
+      // 반복 뒤에 바로 이어지는 잘린 조각 (마지막 단위가 앞 구절의 앞부분)
+      const frag = run >= 2 && j === units.length - 1 && k0.length >= 2 && key(units[j]).length < k0.length && k0.startsWith(key(units[j]));
+      out.push(units[i]);
+      if (run === 2 && !frag) out.push(units[i + 1]);
+      i = frag ? j + 1 : j;
+    }
+    // 실제로 줄인 경우에만 다시 조립 (일본어 문장 사이에 공백이 생기지 않게)
+    if (out.length < units.length) s = out.join(" ").replace(/([。．、，])\s+/g, "$1").trim();
+  }
+  return s;
+}
 const sanitizeCueText = (t) => String(t).replace(/\r/g, "").split("\n").map((s) => s.trim()).filter(Boolean).join("\n").replace(/-->/g, "→");
 const estimateDur = (text) => clamp(text.length / 7 + 0.6, 1, 6);
 
@@ -1677,8 +1710,8 @@ const estimateDur = (text) => clamp(text.length / 7 + 0.6, 1, 6);
 function buildCues(segments, duration, vadTimed = false) {
   let list = [];
   for (const s of segments) {
-    const text = cleanText(s.text);
-    if (!text || isHallucination(text)) continue;
+    const text = tidyCue(cleanText(s.text));
+    if (!hasContent(text) || isHallucination(text)) continue;
     const start = clamp(s.start, 0, duration);
     let end = s.end === null ? null : clamp(s.end, 0, duration);
     if (end !== null && end <= start) end = null;
@@ -1730,9 +1763,16 @@ function buildCues(segments, duration, vadTimed = false) {
   return final;
 }
 function cuesToSrt(cues, useKo) {
-  return "﻿" + cues.map((c, i) =>
-    `${i + 1}\n${formatSrtTime(c.start)} --> ${formatSrtTime(c.end)}\n${sanitizeCueText((useKo && c.ko) || c.text)}`
-  ).join("\n\n") + "\n";
+  // 번역이 정리 후 비면 일본어 원문, 그것도 비면 그 줄은 빼고 번호를 다시 매김
+  const lines = [];
+  for (const c of cues) {
+    let t = useKo && c.ko ? tidyCue(c.ko) : "";
+    if (KO_META_RE.test(t)) t = ""; // 번역기가 지시문을 자막처럼 내보낸 줄("번역된 결과는 반드시…", "주석: …")
+    if (!hasContent(t)) t = tidyCue(c.text);
+    if (!hasContent(t)) continue;
+    lines.push(`${lines.length + 1}\n${formatSrtTime(c.start)} --> ${formatSrtTime(c.end)}\n${sanitizeCueText(t)}`);
+  }
+  return "﻿" + lines.join("\n\n") + "\n";
 }
 
 // ───────────────────────── Gemini 번역 (무결성 검증) ─────────────────────────
